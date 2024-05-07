@@ -2,7 +2,6 @@
 
 import os
 import pandas as pd
-import json
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'datasets')
 

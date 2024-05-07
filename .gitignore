@@ -1,2 +1,11 @@
 src/manifold_learning/data/datasets/CellCycle4X.csv
 src/manifold_learning/data/datasets/Jan1023_1_fr_ma2sec_sr30.csv
+src/manifold_learning.egg-info/top_level.txt
+src/manifold_learning.egg-info/dependency_links.txt
+src/manifold_learning.egg-info/PKG-INFO
+src/manifold_learning.egg-info/SOURCES.txt
+src/manifold_learning.egg-info/requires.txt
+src/manifold_learning/__pycache__/__init__.cpython-312.pyc
+src/manifold_learning/__pycache__/nD_cICA.cpython-312.pyc
+src/manifold_learning/data/__pycache__/__init__.cpython-312.pyc
+src/manifold_learning/data/__pycache__/data_loader.cpython-312.pyc
