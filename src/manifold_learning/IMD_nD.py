@@ -90,18 +90,20 @@ class IndependentManifoldDecomposition:
 
     def loss_fn(self, sample_td, sample_pred, subset_td, subset_pred, nbrs_num):
         dim = sample_td.shape[-1]
+        corr = torch.abs(self.get_autoreg_matrix(sample_td, sample_pred))
 
         ccm = torch.abs(self.get_ccm_matrix(sample_td, sample_pred, subset_td, subset_pred, nbrs_num))
         mask = torch.eye(dim,dtype=bool,device=self.device)
         if dim > 1:
             score = 1 + (torch.mean(ccm[:,~mask].reshape(-1,dim,dim-1),axis=2)/2 + \
                         torch.mean(ccm[:,~mask].reshape(-1,dim-1,dim),axis=1)/2 - \
-                    (ccm[:,mask]**2)
+                    (ccm[:,mask]**2) \
+                    +(corr[:,mask]**2)
                         ).mean()
         else:
-            score = 1 + (-(ccm[:,0,0])).mean()
+            score = 1 + (-ccm[:,0,0] + corr[:,0,0]).mean()
         return score
-
+    
 
     def get_ccm_matrix(self, sample_td, sample_pred, subset_td, subset_pred, nbrs_num):
         dim = sample_td.shape[-1]
@@ -115,6 +117,23 @@ class IndependentManifoldDecomposition:
         A = subset_pred_indexed.reshape(-1, nbrs_num, E, dim, dim).mean(axis=1)
         B = sample_pred[:,:,None,:,].expand(sample_pred.shape[0], E, dim, dim)
 
+        mean_A = torch.mean(A,axis=0)
+        mean_B = torch.mean(B,axis=0)
+        
+        sum_AB = torch.sum((A - mean_A[None,:,:]) * (B - mean_B[None,:,:]),axis=0)
+        sum_AA = torch.sum((A - mean_A[None,:,:]) ** 2,axis=0)
+        sum_BB = torch.sum((B - mean_B[None,:,:]) ** 2,axis=0)
+        
+        
+        r_AB = sum_AB / torch.sqrt(sum_AA * sum_BB)
+        return r_AB
+    
+    def get_autoreg_matrix(self, A, B):
+        dim = A.shape[-1]
+        E = A.shape[-2]
+        
+        A = A[:,:,:,None].expand(-1, E, dim, dim)
+        B = B[:,:,None,:].expand(-1, E, dim, dim)
         mean_A = torch.mean(A,axis=0)
         mean_B = torch.mean(B,axis=0)
         
