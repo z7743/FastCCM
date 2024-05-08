@@ -4,8 +4,18 @@ import torch.optim as optim
 
 from torch.utils.data import DataLoader, Dataset
 
+
 class LinearProjectionNDim(nn.Module):
-    def __init__(self, input_dim, embed_dim, output_dim,device="cuda"):
+    def __init__(self, input_dim, embed_dim, output_dim, device="cuda"):
+        """
+        Initializes the linear projection module.
+        
+        Args:
+            input_dim (int): The dimension of the input data.
+            embed_dim (int): The dimension of the embedding.
+            output_dim (int): The dimension of the output projection.
+            device (str, optional): Device to place the model on, default is "cuda".
+        """
         super(LinearProjectionNDim, self).__init__()
         self.device = device
 
@@ -15,29 +25,40 @@ class LinearProjectionNDim(nn.Module):
         self.model = nn.Linear(input_dim, output_dim*embed_dim, bias=False,device=self.device)
 
     def forward(self, x):
-
+        """
+        Forward pass of the module.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape `(batch_size, input_dim)`.
+        
+        Returns:
+            torch.Tensor: Output tensor of shape `(batch_size, embed_dim, output_dim)`.
+        """
         x = self.model(x).reshape(-1,self.embed_dim,self.output_dim)
 
         return x
+    
+    def get_weights(self):
+
+        return torch.permute(self.model.weight.reshape(-1,self.embed_dim,self.output_dim), dims=(0,2,1)).cpu().detach().numpy()
 
 
-class ModelTrainer:
-    def __init__(self, input_dim, embed_dim, output_dim, learning_rate=0.001,device="cuda"):
+
+class IndependentManifoldDecomposition:
+    def __init__(self, input_dim, embed_dim, n_components, learning_rate=0.001,device="cuda"):
         self.device = device
-        self.model = LinearProjectionNDim(input_dim, embed_dim, output_dim, device)
+
+        self.model = LinearProjectionNDim(input_dim, embed_dim, n_components, device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate,)
 
-        self.loss_history  = []
-
-    def get_loss_history(self):
-        return self.loss_history
+        self.loss_history = []
 
     def fit(self, X, sample_len, library_len, nbrs_num, tp, epochs=10, num_batches=32):
         X = torch.tensor(X,requires_grad=True,device=self.device, dtype=torch.float32)
         X_train, y_train = X[:X.shape[0]-tp], X[tp:]
 
-        dataset = RandomSubsetDataset(X_train, y_train, sample_len, library_len, num_batches)
+        dataset = RandomSubsetDataset(X_train, y_train, sample_len, library_len, num_batches,device=self.device)
         dataloader = DataLoader(dataset, batch_size=1)
 
         for epoch in range(epochs):
@@ -50,7 +71,7 @@ class ModelTrainer:
                 sample_X_z = self.model(sample_X)
                 sample_y_z = self.model(sample_y)
 
-                loss = self.loss_fn(sample_X_z, sample_y_z,subset_X_z, subset_y_z, nbrs_num)
+                loss = self.loss_fn(sample_X_z, sample_y_z, subset_X_z, subset_y_z, nbrs_num)
                 loss /= num_batches
                 loss.backward()
                 total_loss += loss.item() 
@@ -109,9 +130,24 @@ class ModelTrainer:
         dist = torch.cdist(sublib,lib)
         indices = torch.topk(dist, n_nbrs, largest=False)[1]
         return indices
+
+    def get_loss_history(self):
+        return self.loss_history
     
+
 class RandomSubsetDataset(Dataset):
     def __init__(self, X, y, sample_len, library_len, num_batches, device="cuda"):
+        """
+        Initializes the RandomSubsetDataset.
+        
+        Args:
+            X (torch.Tensor): Multivariate time series to be sampled.
+            y (torch.Tensor): Multivariate time series coupled with X.
+            sample_len (int): Number of samples used for prediction.
+            library_len (int): Number of samples used for kNN search.
+            num_batches (int): Number of random batches to be produced.
+            device (str, optional): Device to place the dataset on, default is "cuda".
+        """
         self.device = device
         self.X = X
         self.y = y

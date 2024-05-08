@@ -1,6 +1,6 @@
 from .data.data_loader import load_csv_dataset
-from .nD_cICA import LinearProjectionNDim, ModelTrainer, RandomSubsetDataset
+from .IMD_nD import LinearProjectionNDim, IndependentManifoldDecomposition, RandomSubsetDataset
 
 __all__ = [
-    'load_csv_dataset', "LinearProjectionNDim", "ModelTrainer", "RandomSubsetDataset"
+    'load_csv_dataset', "LinearProjectionNDim", "IndependentManifoldDecomposition", "RandomSubsetDataset"
 ]
