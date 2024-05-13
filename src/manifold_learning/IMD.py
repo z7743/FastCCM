@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
 from torch.utils.data import DataLoader, Dataset
 
 
 class LinearProjectionNDim(nn.Module):
-    def __init__(self, input_dim, embed_dim, output_dim, device="cuda"):
+    def __init__(self, input_dim, embed_dim, output_dim, device="cuda",random_state=None):
         """
         Initializes the linear projection module.
         
@@ -15,6 +14,7 @@ class LinearProjectionNDim(nn.Module):
             embed_dim (int): The dimension of the embedding.
             output_dim (int): The dimension of the output projection.
             device (str, optional): Device to place the model on, default is "cuda".
+            random_state (int): Ignored if None.
         """
         super(LinearProjectionNDim, self).__init__()
         self.device = device
@@ -22,7 +22,9 @@ class LinearProjectionNDim(nn.Module):
         self.embed_dim = embed_dim
         self.output_dim = output_dim
 
-        self.model = nn.Linear(input_dim, output_dim*embed_dim, bias=False,device=self.device)
+        if random_state != None:
+            torch.manual_seed(random_state)
+        self.model = nn.Linear(input_dim, output_dim*embed_dim, bias=False,device=self.device,)
 
     def forward(self, x):
         """
@@ -44,23 +46,26 @@ class LinearProjectionNDim(nn.Module):
 
 
 
-class IndependentManifoldDecomposition:
-    def __init__(self, input_dim, embed_dim, n_components, learning_rate=0.001,device="cuda"):
+class IMD_nD:
+
+    def __init__(self, input_dim, embed_dim, n_components, learning_rate=0.001,device="cuda",optimizer="Adam",random_state=None):
         self.device = device
 
-        self.model = LinearProjectionNDim(input_dim, embed_dim, n_components, device)
+        self.model = LinearProjectionNDim(input_dim, embed_dim, n_components, device,random_state)
 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate,)
+        self.optimizer = getattr(optim, optimizer)(self.model.parameters(), lr=learning_rate,)
+        #self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate,)
 
         self.loss_history = []
 
     def fit(self, X, sample_len, library_len, nbrs_num, tp, epochs=10, num_batches=32):
-        X = torch.tensor(X,requires_grad=True,device=self.device, dtype=torch.float32)
+
+        X = torch.tensor(X,requires_grad=True, device="cpu", dtype=torch.float32)
         X_train, y_train = X[:X.shape[0]-tp], X[tp:]
 
         dataset = RandomSubsetDataset(X_train, y_train, sample_len, library_len, num_batches,device=self.device)
-        dataloader = DataLoader(dataset, batch_size=1)
-
+        dataloader = DataLoader(dataset, batch_size=1,pin_memory=False)
+        
         for epoch in range(epochs):
             total_loss = 0
             self.optimizer.zero_grad()
@@ -116,16 +121,8 @@ class IndependentManifoldDecomposition:
         
         A = subset_pred_indexed.reshape(-1, nbrs_num, E, dim, dim).mean(axis=1)
         B = sample_pred[:,:,None,:,].expand(sample_pred.shape[0], E, dim, dim)
-
-        mean_A = torch.mean(A,axis=0)
-        mean_B = torch.mean(B,axis=0)
         
-        sum_AB = torch.sum((A - mean_A[None,:,:]) * (B - mean_B[None,:,:]),axis=0)
-        sum_AA = torch.sum((A - mean_A[None,:,:]) ** 2,axis=0)
-        sum_BB = torch.sum((B - mean_B[None,:,:]) ** 2,axis=0)
-        
-        
-        r_AB = sum_AB / torch.sqrt(sum_AA * sum_BB)
+        r_AB = self.get_batch_corr(A,B)
         return r_AB
     
     def get_autoreg_matrix(self, A, B):
@@ -134,13 +131,17 @@ class IndependentManifoldDecomposition:
         
         A = A[:,:,:,None].expand(-1, E, dim, dim)
         B = B[:,:,None,:].expand(-1, E, dim, dim)
+
+        r_AB = self.get_batch_corr(A,B)
+        return r_AB
+    
+    def get_batch_corr(self,A, B):
         mean_A = torch.mean(A,axis=0)
         mean_B = torch.mean(B,axis=0)
         
         sum_AB = torch.sum((A - mean_A[None,:,:]) * (B - mean_B[None,:,:]),axis=0)
         sum_AA = torch.sum((A - mean_A[None,:,:]) ** 2,axis=0)
         sum_BB = torch.sum((B - mean_B[None,:,:]) ** 2,axis=0)
-        
         
         r_AB = sum_AB / torch.sqrt(sum_AA * sum_BB)
         return r_AB
@@ -177,10 +178,20 @@ class RandomSubsetDataset(Dataset):
 
     def __len__(self):
         return self.num_batches #Temporary solution to sample number of samples
-
-    def __getitem__(self, idx):
+    
+    def p__getitem__(self, idx):
         sample_idx = torch.argsort(torch.rand(self.num_datapoints,device=self.device))[0:self.sample_len]
         library_idx = torch.argsort(torch.rand(self.num_datapoints,device=self.device))[0:self.library_len+self.sample_len]
         library_idx = library_idx[(library_idx.view(1, -1) != sample_idx.view(-1, 1)).all(dim=0)][0:self.library_len]
         
         return self.X[library_idx],self.y[library_idx], self.X[sample_idx], self.y[sample_idx]
+    
+    def __getitem__(self, idx):
+        sample_idx = torch.argsort(torch.rand(self.num_datapoints))[0:self.sample_len]
+        library_idx = torch.argsort(torch.rand(self.num_datapoints))[0:self.library_len+self.sample_len]
+        library_idx = library_idx[(library_idx.view(1, -1) != sample_idx.view(-1, 1)).all(dim=0)][0:self.library_len]
+
+        return self.X[library_idx].to(self.device), \
+                self.y[library_idx].to(self.device), \
+                self.X[sample_idx].to(self.device), \
+                self.y[sample_idx].to(self.device)
