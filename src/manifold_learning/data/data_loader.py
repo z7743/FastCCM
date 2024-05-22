@@ -38,7 +38,7 @@ def load_ld2011_2014_dataset() -> pd.DataFrame:
     return df
 
 def load_traffic_dataset() -> pd.DataFrame:
-    filename = "train_1.csv"
+    filename = "train_2.csv"
     filepath = os.path.join(DATA_DIR, filename)
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File '{filename}' not found in datasets directory.")

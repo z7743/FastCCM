@@ -1,5 +1,4 @@
-src/manifold_learning/data/datasets/CellCycle4X.csv
-src/manifold_learning/data/datasets/Jan1023_1_fr_ma2sec_sr30.csv
+src/manifold_learning/data/*
 src/manifold_learning.egg-info/top_level.txt
 src/manifold_learning.egg-info/dependency_links.txt
 src/manifold_learning.egg-info/PKG-INFO
@@ -19,3 +18,8 @@ notebooks/.ipynb_checkpoints/test-checkpoint.ipynb
 notebooks/.ipynb_checkpoints/test-checkpoint.ipynb
 src/manifold_learning/__pycache__/IMD.cpython-312.pyc
 src/manifold_learning/data/datasets/LD2011_2014.txt
+notebooks/traffic_dataset_14_20_sl10_ll360_knn20_tp15.pth
+notebooks/traffic_dataset_14_20_sl140_ll400_knn20_tp15.pth
+notebooks/.ipynb_checkpoints/test-checkpoint.ipynb
+src/manifold_learning/__pycache__/IMD.cpython-312.pyc
+notebooks/.ipynb_checkpoints/test-checkpoint.ipynb
