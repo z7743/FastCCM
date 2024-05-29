@@ -25,6 +25,12 @@ class LinearProjectionNDim(nn.Module):
         if random_state != None:
             torch.manual_seed(random_state)
         self.model = nn.Linear(input_dim, output_dim*embed_dim, bias=False,device=self.device,)
+        #self.model = nn.Sequential(nn.Linear(input_dim, input_dim, bias=True,device=self.device,),
+        #                           nn.Sigmoid(),
+        #                            nn.Linear(input_dim, input_dim, bias=True,device=self.device,),
+        #                           nn.Sigmoid(),
+        #                           nn.Linear(input_dim, output_dim*embed_dim, bias=False,device=self.device,)
+        #                           )
 
     def forward(self, x):
         """
@@ -55,7 +61,7 @@ class LinearProjectionNDim(nn.Module):
 
         # Compute the pseudoinverse of the weight matrix
         weight = self.model.weight
-        weight_pinv = torch.pinverse(weight).to(self.device)
+        weight_pinv = torch.pinverse(weight)#.to(self.model.device)
 
         # Compute the input using the pseudoinverse
         x_reconstructed = y_flat @ weight_pinv.T
@@ -113,14 +119,13 @@ class IMD_nD:
             tp_policy (str, optional): Batch sampling policy, default is "range". If "range" then the embedding will be optimized for the range of 1...tp and the total number of samplings calculated as num_batches*tp. If "fixed" then within one optimization cycle the embedding will be optimized only for one value of tp.
         """
         X = torch.tensor(X,requires_grad=True, device=self.device, dtype=torch.float32)
-        X_train, y_train = X[:X.shape[0]-tp], X[tp:]
 
         if tp_policy == "fixed":
-            dataset = RandomSubsetDataset(X_train, y_train, sample_len, library_len, num_batches,device=self.device)
+            dataset = RandomSubsetDatasetTpRange(X, sample_len, library_len, num_batches, torch.arange(tp,tp+1),device=self.device)
         elif tp_policy == "range":
-            dataset = RandomSubsetDatasetTpRange(X, sample_len, library_len, num_batches, tp, device=self.device)
+            dataset = RandomSubsetDatasetTpRange(X, sample_len, library_len, num_batches, torch.arange(1,tp+1), device=self.device)
         else:
-            pass #TODO: exception
+            pass #TODO: pass an exception
 
         dataloader = DataLoader(dataset, batch_size=1,pin_memory=False)
 
@@ -138,7 +143,10 @@ class IMD_nD:
 
                 loss = self.loss_fn(subset_idx, sample_idx,sample_X_z, sample_y_z, subset_X_z, subset_y_z, nbrs_num, exclusion_rad)
                 
-                loss /= tp * num_batches
+                if tp_policy == "range":
+                    loss /= tp * num_batches
+                elif tp_policy == "fixed":
+                    loss /= num_batches
                 loss.backward()
                 total_loss += loss.item() 
 
@@ -162,7 +170,7 @@ class IMD_nD:
             outputs = torch.permute(self.model(inputs),dims=(0,2,1)) #Easier to interpret
         return outputs.cpu().numpy()
 
-    def generate(self, X, nbrs_num, exclusion_rad, tp=1):
+    def generate(self, X, nbrs_num, exclusion_rad, tp=1, device="cpu"):
         """
         Generates the prediction using the model.
         
@@ -176,24 +184,26 @@ class IMD_nD:
             tuple: Generated results and the reconstructed input.
         """
         with torch.no_grad():
-            inputs = torch.tensor(X, dtype=torch.float32,device=self.device)
+            inputs = torch.tensor(X, dtype=torch.float32,device=device)
+            self.model.to(device)
             X = self.model(inputs)
             lib = torch.permute(X,dims=(2,0,1))
 
             dist = torch.cdist(lib,lib[:,:-tp])
             indices = torch.topk(dist, nbrs_num + 2 * exclusion_rad, largest=False)[1]
 
-            mask = (indices >= (torch.arange(X.shape[0],device=self.device) + exclusion_rad)[None,:,None]) | (indices <= (torch.arange(X.shape[0],device=self.device) - exclusion_rad)[None,:,None])
+            mask = (indices >= (torch.arange(X.shape[0],device=device) + exclusion_rad)[None,:,None]) | (indices <= (torch.arange(X.shape[0],device=device) - exclusion_rad)[None,:,None])
             cumsum_mask = mask.cumsum(dim=2)
             selector = cumsum_mask <= nbrs_num
             selector = selector * mask
             indices = indices[selector].view(mask.shape[0],mask.shape[1],nbrs_num)
 
             indices += tp
-            subset_pred_indexed = lib[torch.arange(X.shape[-1],device=self.device)[:,None,None],indices]
+            subset_pred_indexed = lib[torch.arange(X.shape[-1],device=device)[:,None,None],indices]
             res = torch.permute(subset_pred_indexed.mean(axis=2), dims=(1,2,0))
-
-        return res, self.model.backward(res)
+            rec = self.model.backward(res)
+            self.model.to(self.device)
+        return res, rec
 
     def loss_fn(self, subset_idx, sample_idx, sample_td, sample_pred, subset_td, subset_pred, nbrs_num, exclusion_rad):
         dim = sample_td.shape[-1]
@@ -302,39 +312,8 @@ class IMD_nD:
         return self.loss_history
     
 
-class RandomSubsetDataset(Dataset):
-    def __init__(self, X, y, sample_len, library_len, num_batches=32, device="cuda"):
-        """
-        Initializes the RandomSubsetDataset.
-        
-        Args:
-            X (torch.Tensor): Multivariate time series to be sampled.
-            y (torch.Tensor): Multivariate time series coupled with X.
-            sample_len (int): Number of samples used for prediction.
-            library_len (int): Number of samples used for kNN search.
-            num_batches (int): Number of random batches to be produced.
-            device (str, optional): Device to place the dataset on, default is "cuda".
-        """
-        self.device = device
-        self.X = X
-        self.y = y
-        self.sample_len = sample_len
-        self.library_len = library_len
-        self.num_batches = num_batches
-        self.num_datapoints = X.shape[0]
-
-    def __len__(self):
-        return self.num_batches #Temporary solution to sample number of samples
-    
-    def __getitem__(self, idx):
-        sample_idx = torch.argsort(torch.rand(self.num_datapoints,device=self.device))[0:self.sample_len]
-        library_idx = torch.argsort(torch.rand(self.num_datapoints,device=self.device))[0:self.library_len + self.sample_len]
-        library_idx = library_idx[(library_idx.view(1, -1) != sample_idx.view(-1, 1)).all(dim=0)][0:self.library_len]
-        
-        return library_idx, sample_idx, self.X[library_idx],self.y[library_idx], self.X[sample_idx], self.y[sample_idx]
-
 class RandomSubsetDatasetTpRange(Dataset):
-    def __init__(self, X, sample_len, library_len, num_batches=32, tp=1, device="cuda"):
+    def __init__(self, X, sample_len, library_len, num_batches=32, tp_range=torch.arange(1,2), device="cuda"):
         """
         Initializes the RandomSubsetDataset.
         
@@ -350,17 +329,19 @@ class RandomSubsetDatasetTpRange(Dataset):
         self.X = X
         self.sample_len = sample_len
         self.library_len = library_len
-        self.tp = tp
+        self.tp_range = tp_range
+        self.tp_max = tp_range.max()
         self.num_batches = num_batches
         self.num_datapoints = X.shape[0]
 
     def __len__(self):
-        return self.tp * self.num_batches#Temporary solution to sample number of samples
+        return self.tp_range.shape[0] * self.num_batches#Temporary solution to sample number of samples
     
     def __getitem__(self, idx):
-        sample_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp-1,device=self.device))[0:self.sample_len]
-        library_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp-1,device=self.device))[0:self.library_len + self.sample_len]
+        sample_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp_max-1,device=self.device))[0:self.sample_len]
+        library_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp_max-1,device=self.device))[0:self.library_len + self.sample_len]
         library_idx = library_idx[(library_idx.view(1, -1) != sample_idx.view(-1, 1)).all(dim=0)][0:self.library_len]
         
-        return library_idx, sample_idx, self.X[library_idx],self.X[library_idx+idx%self.tp+1], self.X[sample_idx], self.X[sample_idx+idx%self.tp+1]
+        return library_idx, sample_idx, self.X[library_idx],self.X[library_idx+self.tp_range[idx%self.tp_range.shape[0]]],\
+                                        self.X[sample_idx], self.X[sample_idx+self.tp_range[idx%self.tp_range.shape[0]]]
     

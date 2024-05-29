@@ -23,3 +23,7 @@ notebooks/traffic_dataset_14_20_sl140_ll400_knn20_tp15.pth
 notebooks/.ipynb_checkpoints/test-checkpoint.ipynb
 src/manifold_learning/__pycache__/IMD.cpython-312.pyc
 notebooks/.ipynb_checkpoints/test-checkpoint.ipynb
+notebooks/cICA-nD.ipynb
+notebooks/traffic_dataset_pca.pth
+notebooks/traffic_dataset.pth
+src/manifold_learning/__pycache__/IMD.cpython-312.pyc
