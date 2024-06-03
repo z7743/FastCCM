@@ -4,51 +4,59 @@ class CCM:
     def __init__(self,device = "cpu"):
         self.device = device
 
-    def get_matrix(self, X, library_len, sample_len, exclusion_rad, nbrs_num, tp=0):
-        dim = X.shape[0]
-        max_E = torch.tensor([X[i].shape[-1] for i in range(dim)]).max().item()
-        min_len = torch.tensor([X[i].shape[0] for i in range(dim)]).min().item()
+    def compute(self, X, Y, library_len, sample_len, exclusion_rad, nbrs_num, tp=0):
+        # Number of time series 
+        num_ts_X = X.shape[0]
+        num_ts_Y = Y.shape[0]
+        # Max embedding dimension
+        max_E = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)] + [X[i].shape[-1] for i in range(num_ts_X)]).max().item()
+        # Max common length
+        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
 
-        X_lib_indices = self.get_random_indices(min_len, library_len, tp)
-        X_smpl_indices = self.get_random_indices(min_len, sample_len, tp)
+        # Random indices for sampling
+        lib_indices = self.get_random_indices(min_len, library_len, tp)
+        smpl_indices = self.get_random_indices(min_len, sample_len, tp)
 
-        X_lib, Y_lib = self.get_random_sample(X, X_lib_indices, dim, max_E, tp)
-        X_sample, Y_sample = self.get_random_sample(X, X_smpl_indices, dim, max_E, tp)
+        # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
+        X_lib = self.get_random_sample(X, min_len, lib_indices, num_ts_X, max_E)
+        X_sample = self.get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E)
+        Y_lib_shifted = self.get_random_sample(Y, min_len, lib_indices+tp, num_ts_Y, max_E)
+        Y_sample_shifted = self.get_random_sample(Y,min_len, smpl_indices+tp, num_ts_Y, max_E)
 
-        indices = self.get_nbrs_indices(X_lib,X_sample,nbrs_num,X_lib_indices,X_smpl_indices, exclusion_rad)
+        # Find indices of a neighbors of X_sample among X_lib
+        indices = self.get_nbrs_indices(X_lib,X_sample,nbrs_num,lib_indices,smpl_indices, exclusion_rad)
 
-        I = indices.reshape(dim,-1).T 
+        I = indices.reshape(num_ts_X,-1).T 
+
+        # Pairwise crossmapping of all indices of X to all embeddings of Y
+        subset_pred_indexed = torch.permute(Y_lib_shifted,(1,2,0))[I[:, None,None, :],torch.arange(max_E,device=self.device)[:,None,None], torch.arange(num_ts_Y,device=self.device)[None,:,None]]
         
-        subset_pred_indexed = torch.permute(Y_lib,(1,2,0))[I[:, None,None, :],torch.arange(max_E,device=self.device)[:,None,None], torch.arange(dim,device=self.device)[None,:,None]]
+        A = subset_pred_indexed.reshape(-1, nbrs_num, max_E, num_ts_Y, num_ts_X).mean(axis=1)
+        B = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E, num_ts_Y,num_ts_X)
         
-        A = subset_pred_indexed.to("cpu").reshape(-1, nbrs_num, max_E, dim, dim).mean(axis=1)
-        B = torch.permute(Y_sample,(1,2,0))[:,:,None,:,].to("cpu").expand(Y_sample.shape[1], max_E, dim, dim)
-        
-        r_AB = self.get_batch_corr(A,B)
+        r_AB = self.get_batch_corr(A, B)
         return r_AB.to("cpu")
 
-
-    def get_random_sample(self, X, indices, dim, max_E, tp):
-        X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device)
-        Y_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device)
-
-        for i in range(dim):
-            X_buf[i] = torch.tensor(X[i],device=self.device)[indices]
-            Y_buf[i] = torch.tensor(X[i],device=self.device)[indices + tp]
-
-        return X_buf, Y_buf
-
     def get_random_indices(self, num_points, sample_len, tp):
-        idxs_X = torch.argsort(torch.rand(num_points-tp-1,device=self.device))[0:sample_len]
+        idxs_X = torch.argsort(torch.rand(num_points-tp,device=self.device))[0:sample_len]
 
         return idxs_X
+
+    def get_random_sample(self, X, min_len, indices, dim, max_E):
+        X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device)
+
+        for i in range(dim):
+            X_buf[i,:,:X[i].shape[-1]] = torch.tensor(X[i][-min_len:],device=self.device)[indices]
+
+        return X_buf
+
 
     def get_nbrs_indices(self, lib, sample, n_nbrs, subset_idx, sample_idx, exclusion_rad):
         dist = torch.cdist(sample,lib)
         indices = torch.topk(dist, n_nbrs + 2*exclusion_rad, largest=False)[1]
         if exclusion_rad > 0:
             
-            mask = ~((subset_idx[indices] <= sample_idx[:,None]+exclusion_rad) & (subset_idx[indices] >= sample_idx[:,None]-exclusion_rad))
+            mask = ~((subset_idx[indices] < (sample_idx[:,None]+exclusion_rad)) & (subset_idx[indices] > (sample_idx[:,None]-exclusion_rad)))
             cumsum_mask = mask.cumsum(dim=2)
             selector = cumsum_mask <= n_nbrs
             selector = selector * mask

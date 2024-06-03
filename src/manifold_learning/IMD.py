@@ -245,7 +245,7 @@ class IMD_nD:
         subset_pred_indexed = subset_pred[I[:, None,None, :],torch.arange(E,device=self.device)[:,None,None], torch.arange(dim,device=self.device)[None,:,None]]
         
         A = subset_pred_indexed.reshape(-1, nbrs_num, E, dim, dim).mean(axis=1)
-        B = sample_pred[:,:,None,:,].expand(sample_pred.shape[0], E, dim, dim)
+        B = sample_pred[:,:,:,None].expand(sample_pred.shape[0], E, dim, dim)
         
         r_AB = self.get_batch_corr(A,B)
         return r_AB
