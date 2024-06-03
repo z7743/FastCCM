@@ -27,3 +27,4 @@ notebooks/cICA-nD.ipynb
 notebooks/traffic_dataset_pca.pth
 notebooks/traffic_dataset.pth
 src/manifold_learning/__pycache__/IMD.cpython-312.pyc
+render/*

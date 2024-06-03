@@ -97,7 +97,9 @@ class IMD_nD:
         self.device = device
 
         self.model = LinearProjectionNDim(input_dim, embed_dim, n_components, device,random_state)
-
+        self.optimizer_name = None
+        self.learning_rate = None
+        self.optimizer = None
         self.subtract_corr = subtract_corr
         self.loss_history = []
 
@@ -129,11 +131,14 @@ class IMD_nD:
 
         dataloader = DataLoader(dataset, batch_size=1,pin_memory=False)
 
-        optimizer = getattr(optim, optimizer)(self.model.parameters(), lr=learning_rate,)
+        if (self.learning_rate != learning_rate) or (self.optimizer_name != optimizer):
+            self.learning_rate = learning_rate
+            self.optimizer_name = optimizer
+            self.optimizer = getattr(optim, optimizer)(self.model.parameters(), lr=learning_rate,)
 
         for epoch in range(epochs):
             total_loss = 0
-            optimizer.zero_grad()
+            self.optimizer.zero_grad()
 
             for subset_idx, sample_idx, subset_X, subset_y, sample_X, sample_y in dataloader:
                 subset_X_z = self.model(subset_X)
@@ -150,7 +155,7 @@ class IMD_nD:
                 loss.backward()
                 total_loss += loss.item() 
 
-            optimizer.step()
+            self.optimizer.step()
 
             print(f'Epoch {epoch + 1}/{epochs}, Loss: {total_loss:.4f}')
             self.loss_history += [total_loss]
@@ -184,22 +189,22 @@ class IMD_nD:
             tuple: Generated results and the reconstructed input.
         """
         with torch.no_grad():
-            inputs = torch.tensor(X, dtype=torch.float32,device=device)
+            X = torch.tensor(X, dtype=torch.float32,device=device)
             self.model.to(device)
-            X = self.model(inputs)
-            lib = torch.permute(X,dims=(2,0,1))
+            X_lib_z = self.model(X)
+            lib = torch.permute(X_lib_z,dims=(2,0,1))
 
             dist = torch.cdist(lib,lib[:,:-tp])
             indices = torch.topk(dist, nbrs_num + 2 * exclusion_rad, largest=False)[1]
 
-            mask = (indices >= (torch.arange(X.shape[0],device=device) + exclusion_rad)[None,:,None]) | (indices <= (torch.arange(X.shape[0],device=device) - exclusion_rad)[None,:,None])
+            mask = (indices >= (torch.arange(X_lib_z.shape[0],device=device) + exclusion_rad)[None,:,None]) | (indices <= (torch.arange(X_lib_z.shape[0],device=device) - exclusion_rad)[None,:,None])
             cumsum_mask = mask.cumsum(dim=2)
             selector = cumsum_mask <= nbrs_num
             selector = selector * mask
             indices = indices[selector].view(mask.shape[0],mask.shape[1],nbrs_num)
 
             indices += tp
-            subset_pred_indexed = lib[torch.arange(X.shape[-1],device=device)[:,None,None],indices]
+            subset_pred_indexed = lib[torch.arange(X_lib_z.shape[-1],device=device)[:,None,None],indices]
             res = torch.permute(subset_pred_indexed.mean(axis=2), dims=(1,2,0))
             rec = self.model.backward(res)
             self.model.to(self.device)
