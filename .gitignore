@@ -29,3 +29,6 @@ notebooks/traffic_dataset.pth
 src/manifold_learning/__pycache__/IMD.cpython-312.pyc
 render/*
 notebooks/traffic_results/*
+notebooks/.ipynb_checkpoints/*
+notebooks/CCM_test1.ipynb
+src/manifold_learning/.ipynb_checkpoints/CCM-checkpoint.py
