@@ -6,4 +6,7 @@ cd manifold_learning
 ```
 pip install -r requirements.txt
 ```
+```
+pip install -e .
+```
 ![alt text](animation.gif)
