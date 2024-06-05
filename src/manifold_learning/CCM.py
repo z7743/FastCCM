@@ -11,6 +11,7 @@ class FastCCM:
         """
         self.device = device
 
+
     def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, nbrs_num, tp=0):
         """
         Main computation function for Convergent Cross Mapping (CCM).
@@ -63,10 +64,12 @@ class FastCCM:
         r_AB = self.__get_batch_corr(A, B)
         return r_AB.to("cpu").numpy()
 
+
     def __get_random_indices(self, num_points, sample_len):
         idxs_X = torch.argsort(torch.rand(num_points,device=self.device))[0:sample_len]
 
         return idxs_X
+
 
     def __get_random_sample(self, X, min_len, indices, dim, max_E):
         X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device)
@@ -75,6 +78,7 @@ class FastCCM:
             X_buf[i,:,:X[i].shape[-1]] = torch.tensor(X[i][-min_len:],device=self.device)[indices]
 
         return X_buf
+
 
     def __get_nbrs_indices(self, lib, sample, n_nbrs, lib_idx, sample_idx, exclusion_rad):
         dist = torch.cdist(sample,lib)
@@ -93,6 +97,7 @@ class FastCCM:
             return indices_exc
         else:
             return indices
+
 
     def __get_batch_corr(self,A, B):
         mean_A = torch.mean(A,axis=0)
