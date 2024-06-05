@@ -1,7 +1,7 @@
-# src/my_conda_project/data/dataset_loader.py
-
 import os
 import pandas as pd
+import numpy as np
+from scipy.integrate import solve_ivp
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'datasets')
 
@@ -43,3 +43,22 @@ def load_traffic_dataset() -> pd.DataFrame:
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File '{filename}' not found in datasets directory.")
     return pd.read_csv(filepath)
+
+def lorenz(t, state, sigma, beta, rho):
+    """
+    [ChatGPT written]
+    """
+    x, y, z = state
+    dxdt = sigma * (y - x)
+    dydt = x * (rho - z) - y
+    dzdt = x * y - beta * z
+    return [dxdt, dydt, dzdt]
+
+def get_truncated_lorenz_rand(tmax = 140, n_steps = 10000, sigma=10, beta=8/3, rho=28):
+    initial_state = np.random.normal(size=(3))
+
+    trunc = int(n_steps/tmax * 40) # Number of steps to get independence from initial conditions
+    t_eval = np.linspace(0, tmax, trunc + n_steps)
+
+    solution = solve_ivp(lorenz, (0, tmax), initial_state, args=(sigma, beta, rho), t_eval=t_eval).y.T[trunc:]
+    return solution

@@ -1,12 +1,13 @@
 import torch
 
-class CCM:
+class FastCCM:
     def __init__(self,device = "cpu"):
         """
-        Initialize the CCM class.
+        Constructs a FastCCM object to perform Convergent Cross Mapping (CCM) using PyTorch.
+        This object is optimized for calculating pariwise CCM matrix and can handle large datasets by utilizing batch processing on GPUs or CPUs.
 
         Parameters:
-            device (str): The device on which to perform computations, defaults to 'cpu'.
+            device (str): The computation device ('cpu' or 'cuda') to use for all calculations.
         """
         self.device = device
 
