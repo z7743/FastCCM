@@ -254,8 +254,8 @@ class IMD_nD:
         dim = A.shape[-1]
         E = A.shape[-2]
         
-        A = A[:,:,:,None].expand(-1, E, dim, dim)
-        B = B[:,:,None,:].expand(-1, E, dim, dim)
+        A = A[:,:,None,:].expand(-1, E, dim, dim)
+        B = B[:,:,:,None].expand(-1, E, dim, dim)
 
         r_AB = self.get_batch_corr(A,B)
         return r_AB
