@@ -32,3 +32,5 @@ notebooks/traffic_results/*
 notebooks/.ipynb_checkpoints/*
 notebooks/CCM_test1.ipynb
 src/manifold_learning/.ipynb_checkpoints/CCM-checkpoint.py
+notebooks/output.avi
+notebooks/output.mp4
