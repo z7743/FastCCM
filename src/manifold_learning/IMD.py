@@ -160,6 +160,30 @@ class IMD_nD:
             print(f'Epoch {epoch + 1}/{epochs}, Loss: {total_loss:.4f}')
             self.loss_history += [total_loss]
 
+    def loss_fn(self, subset_idx, sample_idx, sample_X, sample_y, subset_X, subset_y, nbrs_num, exclusion_rad):
+        dim = sample_X.shape[-1]
+        ccm = torch.abs(self._get_ccm_matrix_approx(subset_idx, sample_idx, sample_X, sample_y, subset_X, subset_y, nbrs_num, exclusion_rad))
+        mask = torch.eye(dim,dtype=bool,device=self.device)
+
+        if self.subtract_corr:
+            corr = torch.abs(self._get_autoreg_matrix_approx(sample_y, sample_X))
+            if dim > 1:
+                score = 1 + (torch.mean(ccm[:,~mask].reshape(-1,dim,dim-1),axis=2)/2 + \
+                             torch.mean(ccm[:,~mask].reshape(-1,dim-1,dim),axis=1)/2).mean() +\
+                           (-ccm[:,mask]**2 + corr[:,mask]**2).mean()
+            else:
+                score = 1 + (-ccm[:,0,0] + corr[:,0,0]).mean()
+            return score
+        else:
+            if dim > 1:
+                score = 1 + (torch.mean(ccm[:,~mask].reshape(-1,dim,dim-1),axis=2)/2 + \
+                             torch.mean(ccm[:,~mask].reshape(-1,dim-1,dim),axis=1)/2).mean() + \
+                           (-ccm[:,mask]**2).mean()
+            else:
+                score = 1 + (-ccm[:,0,0]).mean()
+            return score
+        
+    
     def predict(self, X):
         """
         Calculates embeddings using the trained model.
@@ -210,57 +234,35 @@ class IMD_nD:
             self.model.to(self.device)
         return res, rec
 
-    def loss_fn(self, subset_idx, sample_idx, sample_td, sample_pred, subset_td, subset_pred, nbrs_num, exclusion_rad):
-        dim = sample_td.shape[-1]
-        ccm = torch.abs(self.get_ccm_matrix_approx(subset_idx, sample_idx, sample_td, sample_pred, subset_td, subset_pred, nbrs_num, exclusion_rad))
-        mask = torch.eye(dim,dtype=bool,device=self.device)
-
-        if self.subtract_corr:
-            corr = torch.abs(self.get_autoreg_matrix_approx(sample_pred, sample_td))
-            if dim > 1:
-                score = 1 + (torch.mean(ccm[:,~mask].reshape(-1,dim,dim-1),axis=2)/2 + \
-                            torch.mean(ccm[:,~mask].reshape(-1,dim-1,dim),axis=1)/2 - \
-                        (ccm[:,mask]**2) \
-                        +(corr[:,mask]**2)
-                            ).mean()
-            else:
-                score = 1 + (-ccm[:,0,0] + corr[:,0,0]).mean()
-            return score
-        else:
-            if dim > 1:
-                score = 1 + (torch.mean(ccm[:,~mask].reshape(-1,dim,dim-1),axis=2)/2 + \
-                            torch.mean(ccm[:,~mask].reshape(-1,dim-1,dim),axis=1)/2 - \
-                        (ccm[:,mask]**2)).mean()
-            else:
-                score = 1 + (-ccm[:,0,0]).mean()
-            return score
-
-    def get_ccm_matrix_approx(self, subset_idx, sample_idx, sample_td, sample_pred, subset_td, subset_pred, nbrs_num, exclusion_rad):
-        dim = sample_td.shape[-1]
-        E = sample_td.shape[-2]
+    def _get_ccm_matrix_approx(self, subset_idx, sample_idx, sample_X, sample_y, subset_X, subset_y, nbrs_num, exclusion_rad):
+        dim = sample_X.shape[-1]
+        E = sample_X.shape[-2]
         
-        indices = self.get_nbrs_indices(torch.permute(subset_td,(2,0,1)),torch.permute(sample_td,(2,0,1)), nbrs_num, subset_idx, sample_idx, exclusion_rad)
+        indices = self._get_nbrs_indices(torch.permute(subset_X,(2,0,1)),torch.permute(sample_X,(2,0,1)), nbrs_num, subset_idx, sample_idx, exclusion_rad)
         I = indices.reshape(dim,-1).T 
         
-        subset_pred_indexed = subset_pred[I[:, None,None, :],torch.arange(E,device=self.device)[:,None,None], torch.arange(dim,device=self.device)[None,:,None]]
+        subset_pred_indexed = subset_y[I[:, None,None, :],torch.arange(E,device=self.device)[:,None,None], torch.arange(dim,device=self.device)[None,:,None]]
         
+        ## No gradient for the indexed variable ##
+        #subset_pred_indexed = subset_pred_indexed.detach()
+
         A = subset_pred_indexed.reshape(-1, nbrs_num, E, dim, dim).mean(axis=1)
-        B = sample_pred[:,:,:,None].expand(sample_pred.shape[0], E, dim, dim)
+        B = sample_y[:,:,:,None].expand(sample_y.shape[0], E, dim, dim)
         
-        r_AB = self.get_batch_corr(A,B)
+        r_AB = self._get_batch_corr(A,B)
         return r_AB
     
-    def get_autoreg_matrix_approx(self, A, B):
+    def _get_autoreg_matrix_approx(self, A, B):
         dim = A.shape[-1]
         E = A.shape[-2]
         
         A = A[:,:,None,:].expand(-1, E, dim, dim)
         B = B[:,:,:,None].expand(-1, E, dim, dim)
 
-        r_AB = self.get_batch_corr(A,B)
+        r_AB = self._get_batch_corr(A,B)
         return r_AB
     
-    def get_batch_corr(self,A, B):
+    def _get_batch_corr(self,A, B):
         mean_A = torch.mean(A,axis=0)
         mean_B = torch.mean(B,axis=0)
         
@@ -271,7 +273,7 @@ class IMD_nD:
         r_AB = sum_AB / torch.sqrt(sum_AA * sum_BB)
         return r_AB
     
-    def get_batch_cosine_similarity(self,A, B):
+    def _get_batch_cosine_similarity(self,A, B):
         """
         Computes the batch-wise cosine similarity between two 4D tensors A and B.
         
@@ -298,7 +300,7 @@ class IMD_nD:
         
         return dot_product
 
-    def get_nbrs_indices(self, lib, sublib, n_nbrs, subset_idx, sample_idx, exclusion_rad):
+    def _get_nbrs_indices(self, lib, sublib, n_nbrs, subset_idx, sample_idx, exclusion_rad):
         dist = torch.cdist(sublib,lib)
         indices = torch.topk(dist, n_nbrs + 2*exclusion_rad, largest=False)[1]
         if exclusion_rad > 0:
