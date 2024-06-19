@@ -54,7 +54,8 @@ class FastCCM:
 
         # Pairwise crossmapping of all indices of embedding X to all embeddings of Y_shifted. Unreadble but optimized. 
         # Match every pair of Y_shifted i-th embedding with indices of X j-th 
-        Y_lib_shifted_indexed = torch.permute(Y_lib_shifted,(1,2,0))[I[:, None,None, :],torch.arange(max_E_Y,device=self.device)[:,None,None], torch.arange(num_ts_Y,device=self.device)[None,:,None]]
+        #Y_lib_shifted_indexed = torch.permute(Y_lib_shifted,(1,2,0))[I[:, None,None, :],torch.arange(max_E_Y,device=self.device)[:,None,None], torch.arange(num_ts_Y,device=self.device)[None,:,None]]
+        Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:,I],(1,3,0,2))
         
         # Average across nearest neighbors to get a prediction
         A = Y_lib_shifted_indexed.reshape(-1, nbrs_num, max_E_Y, num_ts_Y, num_ts_X).mean(axis=1)

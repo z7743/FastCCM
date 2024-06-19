@@ -131,6 +131,7 @@ class IMD_nD:
 
         dataloader = DataLoader(dataset, batch_size=1,pin_memory=False)
 
+        # Reinitialize optimizer if parameters changed
         if (self.learning_rate != learning_rate) or (self.optimizer_name != optimizer):
             self.learning_rate = learning_rate
             self.optimizer_name = optimizer
@@ -163,9 +164,11 @@ class IMD_nD:
     def loss_fn(self, subset_idx, sample_idx, sample_X, sample_y, subset_X, subset_y, nbrs_num, exclusion_rad):
         dim = sample_X.shape[-1]
         ccm = torch.abs(self._get_ccm_matrix_approx(subset_idx, sample_idx, sample_X, sample_y, subset_X, subset_y, nbrs_num, exclusion_rad))
+        #ccm = -(self._get_ccm_matrix_approx(subset_idx, sample_idx, sample_X, sample_y, subset_X, subset_y, nbrs_num, exclusion_rad))
         mask = torch.eye(dim,dtype=bool,device=self.device)
 
         if self.subtract_corr:
+            #corr = -(self._get_autoreg_matrix_approx(sample_y, sample_X))
             corr = torch.abs(self._get_autoreg_matrix_approx(sample_y, sample_X))
             if dim > 1:
                 score = 1 + (torch.mean(ccm[:,~mask].reshape(-1,dim,dim-1),axis=2)/2 + \
@@ -241,8 +244,8 @@ class IMD_nD:
         indices = self._get_nbrs_indices(torch.permute(subset_X,(2,0,1)),torch.permute(sample_X,(2,0,1)), nbrs_num, subset_idx, sample_idx, exclusion_rad)
         I = indices.reshape(dim,-1).T 
         
-        subset_pred_indexed = subset_y[I[:, None,None, :],torch.arange(E,device=self.device)[:,None,None], torch.arange(dim,device=self.device)[None,:,None]]
-        
+        #subset_pred_indexed = subset_y[I[:, None,None, :],torch.arange(E,device=self.device)[:,None,None], torch.arange(dim,device=self.device)[None,:,None]]
+        subset_pred_indexed = torch.permute(subset_y[I],(0,2,3,1))
         ## No gradient for the indexed variable ##
         #subset_pred_indexed = subset_pred_indexed.detach()
 
@@ -300,6 +303,27 @@ class IMD_nD:
         
         return dot_product
 
+    def _get_batch_rmse(self, A, B):
+        """
+        Computes the batch-wise Root Mean Square Error (RMSE) between two 4D tensors A and B.
+        
+        Args:
+        A, B: Tensors of shape [num points, num dims, num components, num components].
+        
+        Returns:
+        Tensor of RMSE values with shape [num dims, num components, num components].
+        """
+        # Compute the squared differences between A and B
+        squared_diff = (A - B) ** 2
+        
+        # Compute the mean of the squared differences along the num points axis
+        mean_squared_diff = torch.mean(squared_diff, dim=0)
+        
+        # Compute the square root of the mean squared differences
+        rmse = torch.sqrt(mean_squared_diff)
+        
+        return rmse
+
     def _get_nbrs_indices(self, lib, sublib, n_nbrs, subset_idx, sample_idx, exclusion_rad):
         dist = torch.cdist(sublib,lib)
         indices = torch.topk(dist, n_nbrs + 2*exclusion_rad, largest=False)[1]
@@ -320,7 +344,7 @@ class IMD_nD:
     
 
 class RandomTpRangeSubsetDataset(Dataset):
-    def __init__(self, X, sample_len, library_len, num_batches=32, tp_range=torch.arange(1,2), device="cuda"):
+    def __init__(self, X, sample_size, subset_size, num_batches=32, tp_range=torch.arange(1,2), device="cuda"):
         """
         Initializes the RandomSubsetDataset.
         
@@ -334,22 +358,22 @@ class RandomTpRangeSubsetDataset(Dataset):
         """
         self.device = device
         self.X = X
-        self.sample_len = sample_len
-        self.library_len = library_len
+        self.sample_size = sample_size
+        self.subset_size = subset_size
         self.tp_range = tp_range
         self.tp_max = tp_range.max()
         self.num_batches = num_batches
         self.num_datapoints = X.shape[0]
 
     def __len__(self):
-        return self.tp_range.shape[0] * self.num_batches#Temporary solution to sample number of samples
+        return self.tp_range.shape[0] * self.num_batches #Temporary solution to sample number of samples
     
     def __getitem__(self, idx):
-        sample_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp_max-1,device=self.device))[0:self.sample_len]
-        library_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp_max-1,device=self.device))[0:self.library_len + self.sample_len]
-        library_idx = library_idx[(library_idx.view(1, -1) != sample_idx.view(-1, 1)).all(dim=0)][0:self.library_len]
+        sample_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp_max-1,device=self.device))[0:self.sample_size]
+        subset_idx = torch.argsort(torch.rand(self.num_datapoints-self.tp_max-1,device=self.device))[0:self.subset_size + self.sample_size]
+        subset_idx = subset_idx[(subset_idx.view(1, -1) != sample_idx.view(-1, 1)).all(dim=0)][0:self.subset_size]
         
-        return library_idx, sample_idx, self.X[library_idx],self.X[library_idx+self.tp_range[idx%self.tp_range.shape[0]]],\
+        return subset_idx, sample_idx, self.X[subset_idx],self.X[subset_idx+self.tp_range[idx%self.tp_range.shape[0]]],\
                                         self.X[sample_idx], self.X[sample_idx+self.tp_range[idx%self.tp_range.shape[0]]]
 
 
