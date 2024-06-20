@@ -4,3 +4,4 @@ notebooks/.ipynb_checkpoints
 .ipynb_checkpoints
 .pytest_cache
 notebooks/traffic_results
+src/FastCCM.egg-info
