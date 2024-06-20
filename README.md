@@ -1,4 +1,5 @@
-# manifold_learning
+# FastCCM
+PyTorch based implementation of Convergent Cross Mapping (CCM) optimized for calculating pairwise CCM matrix.
 
 ## Installation
 
@@ -6,7 +7,7 @@ To clone the repository and install the necessary dependencies, follow these ste
 
 1. Clone the repository:
     ```bash
-    git clone https://github.com/z7743/manifold_learning.git
+    git clone https://github.com/z7743/FastCCM.git
     cd manifold_learning
     ```
 
@@ -19,6 +20,4 @@ To clone the repository and install the necessary dependencies, follow these ste
     ```bash
     pip install -e .
     ```
-
-<img src="docs/img/animation.gif" alt="" height="400">
 

@@ -1,6 +1,6 @@
 import torch
 
-class FastCCM:
+class PairwiseCCM:
     def __init__(self,device = "cpu"):
         """
         Constructs a FastCCM object to perform Convergent Cross Mapping (CCM) using PyTorch.

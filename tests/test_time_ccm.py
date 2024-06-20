@@ -2,9 +2,9 @@ import pytest
 import numpy as np
 import time
 import torch
-from manifold_learning import CCM
-from manifold_learning.utils import utils
-from manifold_learning.data.data_loader import get_truncated_lorenz_rand
+from FastCCM import CCM
+from FastCCM.utils import utils
+from FastCCM.data.data_loader import get_truncated_lorenz_rand
 
 ### Helper functions
 def prepare_embeddings(N_sys):
@@ -15,7 +15,7 @@ def prepare_embeddings(N_sys):
 
 def time_ccm_computation(X_emb, Y_emb, trials=15, device="cpu"):
     torch.cuda.empty_cache()
-    ccm = CCM.FastCCM(device=device) 
+    ccm = CCM.PairwiseCCM(device=device) 
 
     start_time = time.time()
     for _ in range(trials):
