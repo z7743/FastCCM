@@ -8,7 +8,7 @@ To clone the repository and install the necessary dependencies, follow these ste
 1. Clone the repository:
     ```bash
     git clone https://github.com/z7743/FastCCM.git
-    cd manifold_learning
+    cd FastCCM
     ```
 
 2. Install the required packages:
