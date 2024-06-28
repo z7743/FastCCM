@@ -12,7 +12,7 @@ class PairwiseCCM:
         self.device = device
 
 
-    def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, nbrs_num, tp=0):
+    def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, nbrs_num, tp=0, subtract_corr = False):
         """
         Main computation function for Convergent Cross Mapping (CCM).
 
@@ -46,6 +46,7 @@ class PairwiseCCM:
         X_sample = self.__get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E_X)
         Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices+tp, num_ts_Y, max_E_Y)
         Y_sample_shifted = self.__get_random_sample(Y,min_len, smpl_indices+tp, num_ts_Y, max_E_Y)
+        Y_sample = self.__get_random_sample(Y,min_len, smpl_indices, num_ts_Y, max_E_Y)
 
         # Find indices of a neighbors of X_sample among X_lib
         indices = self.__get_nbrs_indices(X_lib, X_sample, nbrs_num, lib_indices, smpl_indices, exclusion_rad)
@@ -63,6 +64,14 @@ class PairwiseCCM:
         
         # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X 
         r_AB = self.__get_batch_corr(A, B)
+       
+        if subtract_corr:
+            A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
+            B_ = torch.permute(Y_sample[[0]],(1,2,0))[:,:,None,:].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
+            r_AB_ = self.__get_batch_corr(A_, B_)
+            r_AB_.expand(r_AB_.shape[0],r_AB_.shape[1],r_AB.shape[2])
+            r_AB -= r_AB_
+            
         return r_AB.to("cpu").numpy()
 
 
