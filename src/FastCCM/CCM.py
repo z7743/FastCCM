@@ -12,7 +12,7 @@ class PairwiseCCM:
         self.device = device
 
 
-    def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, nbrs_num, tp=0, subtract_corr = False):
+    def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, tp=0, method="simplex", subtract_corr = False, **kwargs):
         """
         Main computation function for Convergent Cross Mapping (CCM).
 
@@ -28,6 +28,18 @@ class PairwiseCCM:
         Returns:
             np.array: A matrix of correlation coefficients between the real and predicted states.
         """
+        if method == "simplex":
+            required_params = ["nbrs_num"]
+        elif method == "smap":
+            required_params = ["omega"]
+        else:
+            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
+
+        for param in required_params:
+                if param not in kwargs:
+                    raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
+                
+            
         # Number of time series 
         num_ts_X = len(X)
         num_ts_Y = len(Y)
@@ -47,6 +59,28 @@ class PairwiseCCM:
         Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices+tp, num_ts_Y, max_E_Y)
         Y_sample_shifted = self.__get_random_sample(Y,min_len, smpl_indices+tp, num_ts_Y, max_E_Y)
         Y_sample = self.__get_random_sample(Y,min_len, smpl_indices, num_ts_Y, max_E_Y)
+        
+        if method == "simplex":
+            nbrs_num = kwargs["nbrs_num"]
+            r_AB = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num)
+        elif method == "smap":
+            omega = kwargs["omega"]
+            r_AB = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, omega)
+       
+        if subtract_corr:
+            A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
+            B_ = torch.permute(Y_sample[[0]],(1,2,0))[:,:,None,:].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
+            r_AB_ = self.__get_batch_corr(A_, B_)
+            r_AB_.expand(r_AB_.shape[0],r_AB_.shape[1],r_AB.shape[2])
+            r_AB -= r_AB_
+            
+        return r_AB.to("cpu").numpy()
+
+
+    def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num):
+        num_ts_X = X_lib.shape[0]
+        num_ts_Y = Y_lib_shifted.shape[0]
+        max_E_Y = Y_lib_shifted.shape[2]
 
         # Find indices of a neighbors of X_sample among X_lib
         indices = self.__get_nbrs_indices(X_lib, X_sample, nbrs_num, lib_indices, smpl_indices, exclusion_rad)
@@ -64,16 +98,57 @@ class PairwiseCCM:
         
         # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X 
         r_AB = self.__get_batch_corr(A, B)
-       
-        if subtract_corr:
-            A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
-            B_ = torch.permute(Y_sample[[0]],(1,2,0))[:,:,None,:].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
-            r_AB_ = self.__get_batch_corr(A_, B_)
-            r_AB_.expand(r_AB_.shape[0],r_AB_.shape[1],r_AB.shape[2])
-            r_AB -= r_AB_
-            
-        return r_AB.to("cpu").numpy()
 
+        return r_AB
+
+    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, omega):
+        num_ts_X = X_lib.shape[0]
+        num_ts_Y = Y_lib_shifted.shape[0]
+        max_E_X = X_lib.shape[2]
+        max_E_Y = Y_lib_shifted.shape[2]
+        subsample_size = X_sample.shape[1]
+        subset_size = X_lib.shape[1]
+
+        #sample_X_t = sample_X.permute(2, 0, 1)
+        #subset_X_t = subset_X.permute(2, 0, 1)
+        #subset_y_t = subset_y.permute(2, 0, 1)
+        
+        weights = self.__get_local_weights(X_lib,X_sample,lib_indices, smpl_indices, exclusion_rad, omega)
+        W = weights.unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, subset_size).reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, 1)
+
+        X = X_lib.unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, subset_size, max_E_X)
+        X = X.reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, max_E_X)
+
+        Y = Y_lib_shifted.unsqueeze(1).unsqueeze(0).expand(num_ts_X, num_ts_Y, subsample_size, subset_size, max_E_Y)
+        Y = Y.reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, max_E_Y)
+
+        X_intercept = torch.cat([torch.ones((num_ts_X * num_ts_Y * subsample_size, subset_size, 1),device=self.device), X], dim=2)
+        
+        X_intercept_weighted = X_intercept * W
+        Y_weighted = Y * W
+
+        XTWX = torch.bmm(X_intercept_weighted.transpose(1, 2), X_intercept_weighted)
+        XTWy = torch.bmm(X_intercept_weighted.transpose(1, 2), Y_weighted)
+        beta = torch.bmm(torch.inverse(XTWX), XTWy)
+        #beta_ = beta.reshape(dim,dim,sample_size,*beta.shape[1:])
+
+        X_ = X_sample.unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, max_E_X)
+        X_ = X_.reshape(num_ts_X * num_ts_Y * subsample_size, max_E_X)
+        X_ = torch.cat([torch.ones((num_ts_X * num_ts_Y * subsample_size, 1),device=self.device), X_], dim=1)
+        X_ = X_.reshape(num_ts_X * num_ts_Y * subsample_size, 1, max_E_X+1)
+        
+        #A = torch.einsum('abpij,bcpi->abcpj', beta, X_)
+        #A = torch.permute(A[:,0],(2,3,1,0))
+
+        A = torch.bmm(X_, beta).reshape(num_ts_X, num_ts_Y, subsample_size, max_E_Y)
+        A = torch.permute(A,(2,3,1,0))
+
+        B = torch.permute(Y_sample_shifted,(1,2,0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X)
+        #TODO: test whether B = sample_y.unsqueeze(-2).expand(sample_size, E_y, dim, dim)
+        
+        r_AB = self.__get_batch_corr(A,B)
+
+        return r_AB
 
     def __get_random_indices(self, num_points, sample_len):
         idxs_X = torch.argsort(torch.rand(num_points,device=self.device))[0:sample_len]
@@ -108,6 +183,18 @@ class PairwiseCCM:
         else:
             return indices
 
+    def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, omega):
+        dist = torch.cdist(sublib,lib)
+        if omega == None:
+            weights = torch.exp(-(dist))
+        else:
+            weights = torch.exp(-(omega*dist/dist.mean(axis=2)[:,:,None]))
+
+        if exclusion_rad > 0:
+            exclusion_matrix = (torch.abs(subset_idx[None] - sample_idx[:,None]) > exclusion_rad)
+            weights = weights * exclusion_matrix
+        
+        return weights
 
     def __get_batch_corr(self,A, B):
         mean_A = torch.mean(A,axis=0)
