@@ -19,19 +19,25 @@ class PairwiseCCM:
         Parameters:
             X (list of np.array): List of embeddings from which to cross-map.
             Y (list of np.array): List of embeddings to predict.
-            subset_size (int): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. Nearest neighbors for cross-mapping will searched among this subset.
+            subset_size (int): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. Nearest neighbors for cross-mapping will be searched among this subset.
             subsample_size (int): Number of random samples of embeddings to estimate prediction quality. Nearest neighbors for these samples will be searched.
             exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
-            nbrs_num (int): Number of neighbors to consider for nearest neighbor calculations.
             tp (int): Interval of the prediction.
-            subtract_corr (bool): If true, pairwise autocorrelation matrix is subtracted from the CCM result.
+            method (str): Method to compute the prediction ("simplex", "smap").  
+            subtract_corr (bool): If true, the pairwise autocorrelation matrix is subtracted from the CCM result.
+            nbrs_num (int, optional): Number of neighbors to consider for nearest neighbor calculations. Required if method is "simplex".
+            theta (float, optional): Parameter controlling the degree of local weighting. Required if method is "smap".
+
         Returns:
             np.array: A matrix of correlation coefficients between the real and predicted states.
+        
+        Raises:
+            ValueError: If an invalid method is specified or if required parameters for the chosen method are not provided.
         """
         if method == "simplex":
             required_params = ["nbrs_num"]
         elif method == "smap":
-            required_params = ["omega"]
+            required_params = ["theta"]
         else:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
@@ -64,8 +70,8 @@ class PairwiseCCM:
             nbrs_num = kwargs["nbrs_num"]
             r_AB = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num)
         elif method == "smap":
-            omega = kwargs["omega"]
-            r_AB = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, omega)
+            theta = kwargs["theta"]
+            r_AB = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta)
        
         if subtract_corr:
             A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, 1)
@@ -101,7 +107,7 @@ class PairwiseCCM:
 
         return r_AB
 
-    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, omega):
+    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_X = X_lib.shape[2]
@@ -113,7 +119,7 @@ class PairwiseCCM:
         #subset_X_t = subset_X.permute(2, 0, 1)
         #subset_y_t = subset_y.permute(2, 0, 1)
         
-        weights = self.__get_local_weights(X_lib,X_sample,lib_indices, smpl_indices, exclusion_rad, omega)
+        weights = self.__get_local_weights(X_lib,X_sample,lib_indices, smpl_indices, exclusion_rad, theta)
         W = weights.unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, subset_size).reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, 1)
 
         X = X_lib.unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, subset_size, max_E_X)
@@ -183,12 +189,12 @@ class PairwiseCCM:
         else:
             return indices
 
-    def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, omega):
+    def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, theta):
         dist = torch.cdist(sublib,lib)
-        if omega == None:
+        if theta == None:
             weights = torch.exp(-(dist))
         else:
-            weights = torch.exp(-(omega*dist/dist.mean(axis=2)[:,:,None]))
+            weights = torch.exp(-(theta*dist/dist.mean(axis=2)[:,:,None]))
 
         if exclusion_rad > 0:
             exclusion_matrix = (torch.abs(subset_idx[None] - sample_idx[:,None]) > exclusion_rad)
