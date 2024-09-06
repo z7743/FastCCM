@@ -81,8 +81,56 @@ class PairwiseCCM:
             
         return r_AB.to("cpu").numpy()
 
+    def predict(self, X, Y, subset_size, exclusion_rad, tp=0, method="simplex", **kwargs):
+        if method == "simplex":
+            required_params = ["nbrs_num"]
+        elif method == "smap":
+            required_params = ["theta"]
+        else:
+            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
-    def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num):
+        for param in required_params:
+                if param not in kwargs:
+                    raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
+                
+        
+        # Number of time series 
+        num_ts_X = len(X)
+        num_ts_Y = len(Y)
+        # Max embedding dimension
+        max_E_X = torch.tensor([X[i].shape[-1] for i in range(num_ts_X)]).max().item()
+        max_E_Y = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)]).max().item()
+        # Max common length
+        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
+
+        # Random indices for sampling
+        lib_indices = self.__get_random_indices(min_len - tp, subset_size)
+        #smpl_indices = self.__get_random_indices(min_len - tp, subsample_size)
+        smpl_indices = torch.arange(min_len - tp, device=self.device)
+
+        # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
+        X_lib = self.__get_random_sample(X, min_len, lib_indices, num_ts_X, max_E_X)
+        X_sample = self.__get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E_X)
+        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices+tp, num_ts_Y, max_E_Y)
+        Y_sample_shifted = self.__get_random_sample(Y,min_len, smpl_indices+tp, num_ts_Y, max_E_Y)
+        
+        if method == "simplex":
+            nbrs_num = kwargs["nbrs_num"]
+            _, pred = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, True)
+        elif method == "smap":
+            theta = kwargs["theta"]
+            _, pred = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, True)
+       
+        #if subtract_corr:
+        #    A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(min_len, max_E_X, num_ts_Y, num_ts_X)
+        #    B_ = torch.permute(X_sample,(1,2,0))[:,:,None,:].expand(min_len, max_E_Y, num_ts_Y, num_ts_X)
+        #    r_AB_ = self.__get_batch_corr(A_, B_)
+        #    r_AB -= r_AB_
+            
+        return pred.to("cpu").numpy()
+
+
+    def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, return_pred=False):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
@@ -104,9 +152,12 @@ class PairwiseCCM:
         # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X 
         r_AB = self.__get_batch_corr(A, B)
 
-        return r_AB
+        if return_pred:
+            return r_AB, A
+        else:
+            return r_AB
 
-    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta):
+    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, return_pred=False):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_X = X_lib.shape[2]
@@ -153,7 +204,10 @@ class PairwiseCCM:
         
         r_AB = self.__get_batch_corr(A,B)
 
-        return r_AB
+        if return_pred:
+            return r_AB, A
+        else:
+            return r_AB
 
     def __get_random_indices(self, num_points, sample_len):
         idxs_X = torch.argsort(torch.rand(num_points,device=self.device))[0:sample_len]
