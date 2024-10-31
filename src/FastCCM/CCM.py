@@ -266,3 +266,41 @@ class PairwiseCCM:
         r_AB = sum_AB / torch.sqrt(sum_AA * sum_BB)
         return r_AB
     
+    def __get_batch_rmse(self, A, B):
+            """
+            Computes the batch-wise Root Mean Square Error (RMSE) between two 4D tensors A and B.
+            
+            Args:
+            A, B: Tensors of shape [num points, num dims, num components, num components].
+            
+            Returns:
+            Tensor of RMSE values with shape [num dims, num components, num components].
+            """
+            # Compute the squared differences between A and B
+            squared_diff = (A - B) ** 2
+            
+            # Compute the mean of the squared differences along the num points axis
+            mean_squared_diff = torch.mean(squared_diff, dim=0)
+            
+            # Compute the square root of the mean squared differences
+            rmse = torch.sqrt(mean_squared_diff)
+            
+            return rmse
+    
+    def __get_batch_mse(self, A, B):
+        """
+        Computes the batch-wise Mean Squared Error (MSE) between two 4D tensors A and B.
+        
+        Args:
+        A, B: Tensors of shape [num points, num dims, num components, num components].
+        
+        Returns:
+        Tensor of MSE values with shape [num dims, num components, num components].
+        """
+        # Compute the squared differences between A and B
+        squared_diff = (A - B) ** 2
+        
+        # Compute the mean of the squared differences along the num points axis
+        mse = torch.mean(squared_diff, dim=0)
+        
+        return mse
