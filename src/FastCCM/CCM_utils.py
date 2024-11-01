@@ -208,7 +208,7 @@ class Visualizer:
         plt.xscale(xscale)  # Set the X-axis scale to "log" or "linear"
         plt.xlabel("Library Size")
         plt.ylabel("Pearson Correlation Coefficient")
-        plt.title("Convergence Test Visualization with Error Bars" if not plot_means_only else "Convergence Test: Mean Only")
+        plt.title("Convergence Test Visualization" if not plot_means_only else "Convergence Test: Mean Only")
         plt.grid(True)
         plt.legend()
         plt.show()
