@@ -29,9 +29,9 @@ This example demonstrates how to use the FastCCM package for performing Converge
 
 ```python
 from FastCCM import CCM, CCM_utils
-from FastCCM.utils import utils
 from FastCCM.data.data_loader import get_truncated_rossler_lorenz_rand
 import numpy as np
+import matplotlib.pyplot as plt
 ```
 
 2. Initialize the CCM Object
