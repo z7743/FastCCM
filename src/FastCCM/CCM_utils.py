@@ -242,3 +242,29 @@ class Visualizer:
 
         # Display the plot
         plt.show()
+
+    def plot_interval_prediction_test(self, interval_test_res):
+        """
+        Plots the results of an interval prediction test.
+
+        Parameters:
+            interval_test_res (dict): Results from the Functions.prediction_interval_test method.
+        """
+        tp_list = interval_test_res["tp_list"]
+        X_to_Y_results = interval_test_res["X_to_Y"]
+
+        plt.figure(figsize=(10, 6))
+
+        # Plot each dimension of the results with labels
+        num_dimensions = X_to_Y_results.shape[0]
+
+        for dim in range(num_dimensions):
+            plt.plot(tp_list, X_to_Y_results[dim, :, 0].T, label=f"y{dim + 1}")
+
+        # Plot properties
+        plt.legend()
+        plt.xlabel("Prediction Interval")
+        plt.ylabel("Pearson Correlation Coefficient")
+        plt.title("Prediction Interval Test")
+        plt.grid(True)
+        plt.show()
