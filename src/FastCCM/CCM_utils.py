@@ -2,6 +2,9 @@ import torch
 import numpy as np
 from FastCCM.CCM import PairwiseCCM
 from FastCCM.utils.utils import get_td_embedding_np
+import matplotlib.pyplot as plt
+from matplotlib import cm
+
 
 class Functions:
     def __init__(self, device="cpu"):
@@ -127,7 +130,7 @@ class Functions:
                                subsample_size=subsample_size,
                                exclusion_rad=exclusion_rad,
                                tp=0,
-                               subtract_corr=True,
+                               subtract_corr=False,
                                method="simplex",
                                nbrs_num=10)[0].reshape(tp_max-1,tau_range.shape[0],E_range.shape[0],)
         
@@ -137,9 +140,105 @@ class Functions:
 
         # Return results as a dictionary
         return {
+            "E_range": E_range,
+            "tau_range": tau_range,
+            "tp_range": np.arange(1,tp_max),
             "result": res,
             "optimal_tau": tau_range[max_idx[0]],
             "optimal_E": E_range[max_idx[1]],
             "values": res[max_idx]
         }
 
+class Visualizer:
+    def __init__(self):
+        """
+        Initializes the Visualizer class.
+        """
+        pass
+
+    def plot_convergence_test(self, conv_test_res, X_idx=0, Y_idx=0, xscale="log", plot_means_only=False):
+        """
+        Plots the results of a convergence test with error bars representing trial variability.
+        Allows customization of the X-axis scale and an option to plot only mean lines.
+
+        Parameters:
+            conv_test_res (dict): Results from the Functions.convergence_test method.
+            X_idx (int): Index of the embedding in X to visualize.
+            Y_idx (int): Index of the embedding in Y to visualize.
+            xscale (str): Scale of the X-axis, either "log" or "linear".
+            plot_means_only (bool): If True, plots only the mean lines without individual dimension plots.
+        """
+        subset_sizes = conv_test_res["subset_sizes"]
+        X_to_Y_results = conv_test_res["X_to_Y"][:, :, :, Y_idx, X_idx]
+        Y_to_X_results = conv_test_res["Y_to_X"][:, :, :, X_idx, Y_idx]
+
+        # Number of dimensions for Y and X
+        num_dimensions_Y = X_to_Y_results.shape[2]
+        num_dimensions_X = Y_to_X_results.shape[2]
+
+        # Generate color palettes dynamically based on the number of dimensions, avoiding light colors
+        colors_X_to_Y = [cm.gray(0.2 + 0.6 * (i / (num_dimensions_Y - 1))) for i in range(num_dimensions_Y)]
+        colors_Y_to_X = [cm.Reds(0.2 + 0.6 * (i / (num_dimensions_X - 1))) for i in range(num_dimensions_X)]
+
+        plt.figure(figsize=(10, 6))
+
+        if not plot_means_only:
+            # Plot results for (x1, x2, x3) -> y1, y2, y3 with dynamically generated colors and error bars
+            for dim in range(num_dimensions_Y):
+                mean_values = X_to_Y_results.mean(axis=1)[:, dim]
+                std_errors = X_to_Y_results.std(axis=1)[:, dim] / np.sqrt(X_to_Y_results.shape[1])  # Standard error of the mean
+                plt.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"X -> y{dim + 1}", color=colors_X_to_Y[dim])
+
+            # Plot results for (y1, y2, y3) -> x1, x2, x3 with dynamically generated colors and error bars
+            for dim in range(num_dimensions_X):
+                mean_values = Y_to_X_results.mean(axis=1)[:, dim]
+                std_errors = Y_to_X_results.std(axis=1)[:, dim] / np.sqrt(Y_to_X_results.shape[1])  # Standard error of the mean
+                plt.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"Y -> x{dim + 1}", color=colors_Y_to_X[dim])
+
+        # Plot mean lines for emphasis with error bars for overall mean
+        mean_X_to_Y = X_to_Y_results.mean(axis=(1, 2))
+        std_X_to_Y = X_to_Y_results.mean(axis=2).std(axis=1) / np.sqrt(X_to_Y_results.shape[1])
+        plt.errorbar(subset_sizes, mean_X_to_Y, yerr=std_X_to_Y, label="$Y|M_{X}$ (mean)", lw=2.5, color="black")
+
+        mean_Y_to_X = Y_to_X_results.mean(axis=(1, 2))
+        std_Y_to_X = Y_to_X_results.mean(axis=2).std(axis=1) / np.sqrt(Y_to_X_results.shape[1])
+        plt.errorbar(subset_sizes, mean_Y_to_X, yerr=std_Y_to_X, label="$X|M_{Y}$ (mean)", lw=2.5, color="red")
+
+        # Set plot properties
+        plt.xscale(xscale)  # Set the X-axis scale to "log" or "linear"
+        plt.xlabel("Library Size")
+        plt.ylabel("Pearson Correlation Coefficient")
+        plt.title("Convergence Test Visualization with Error Bars" if not plot_means_only else "Convergence Test: Mean Only")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+    def visualize_optimal_e_tau(self, optimal_E_tau_res):
+        """
+        Visualizes the optimal embedding dimension (E) and time delay (tau) results.
+
+        Args:
+            optimal_E_tau_res (dict): Dictionary containing the results of the optimal embedding analysis.
+                                    Expected keys are 'result', 'E_range', and 'tau_range'.
+        """
+        # Extract data from the dictionary
+        result = optimal_E_tau_res["result"].mean(axis=0)
+        E_range = optimal_E_tau_res["E_range"]
+        tau_range = optimal_E_tau_res["tau_range"]
+
+        # Create the plot using imshow for more flexibility
+        plt.figure(figsize=(10, 8))
+        plt.imshow(result, aspect='auto', extent=[E_range[0], E_range[-1], tau_range[0], tau_range[-1]], origin='lower')
+
+        # Set axis labels and title
+        plt.colorbar(label='Mean CCM Value')
+        plt.xlabel('Embedding Dimension (E)')
+        plt.ylabel('Time Delay (tau)')
+        plt.title('Optimal E and Tau Analysis')
+
+        # Set ticks for better visualization
+        plt.xticks(E_range, labels=E_range)
+        plt.yticks(tau_range, labels=tau_range)
+
+        # Display the plot
+        plt.show()
