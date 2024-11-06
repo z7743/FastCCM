@@ -2,6 +2,13 @@ import torch
 import numpy as np
 from sklearn.decomposition import PCA
 
+def get_td_embeddings(ts, opt_E, opt_tau):
+    ts_num = len(ts)
+    tdembs = []
+    for i in range(ts_num):
+        tdembs += [get_td_embedding_np(ts[i][:,None],opt_E[i],opt_tau[i])[:,:,0]]
+    return tdembs
+
 def get_td_embedding_torch(ts, dim, stride, return_pred=False, tp=0):
     tdemb = ts.unfold(0,(dim-1) * stride + 1,1)[...,::stride]
     tdemb = torch.swapaxes(tdemb,-1,-2)
