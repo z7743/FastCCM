@@ -185,7 +185,7 @@ class PairwiseCCM:
 
         XTWX = torch.bmm(X_intercept_weighted.transpose(1, 2), X_intercept_weighted)
         XTWy = torch.bmm(X_intercept_weighted.transpose(1, 2), Y_weighted)
-        beta = torch.bmm(torch.inverse(XTWX), XTWy)
+        beta = torch.bmm(torch.pinverse(XTWX), XTWy)
         #beta_ = beta.reshape(dim,dim,sample_size,*beta.shape[1:])
 
         X_ = X_sample.unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, max_E_X)

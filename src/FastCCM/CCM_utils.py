@@ -103,7 +103,7 @@ class Functions:
             "X_to_Y": np.array(res),
         }
 
-    def find_optimal_embedding_params(self, x, y, subset_size, subsample_size, exclusion_rad, E_range, tau_range, tp_max,  method="simplex", **kwargs):
+    def find_optimal_embedding_params(self, x, y, subset_size, subsample_size, exclusion_rad, E_range, tau_range, tp_max,  method="simplex", trials=10, **kwargs):
         """
         Finds the optimal embedding parameters (E and tau) for CCM.
 
@@ -122,17 +122,18 @@ class Functions:
         Returns:
             dict: Contains the optimal tau, E, and the corresponding CCM value.
         """
+                
         # Prepare embeddings and compute CCM for each tau and E combination
         X_emb = np.concatenate([np.array([get_td_embedding_np(x[:-tp_max,None],e,tau)[:,:,0] for e in E_range],dtype=object) for tau in tau_range])
         Y_emb = np.array([y[:i, None] for i in range(-(tp_max),-1)],dtype=object)
-        res = self.ccm.compute(X_emb,Y_emb,
+        res = np.mean([self.ccm.compute(X_emb,Y_emb,
                                subset_size=subset_size,
                                subsample_size=subsample_size,
                                exclusion_rad=exclusion_rad,
                                tp=0,
                                subtract_corr=False,
-                               method="simplex",
-                               nbrs_num=10)[0].reshape(tp_max-1,tau_range.shape[0],E_range.shape[0],)
+                               method=method,
+                               **kwargs)[0].reshape(tp_max-1,tau_range.shape[0],E_range.shape[0],) for exp in range(trials)],axis=0)
         
 
         # Find optimal tau and E for this set
@@ -146,7 +147,7 @@ class Functions:
             "result": res,
             "optimal_tau": tau_range[max_idx[0]],
             "optimal_E": E_range[max_idx[1]],
-            "values": res[max_idx]
+            "values": res[:,*max_idx]
         }
 
 class Visualizer:
@@ -169,12 +170,12 @@ class Visualizer:
             plot_means_only (bool): If True, plots only the mean lines without individual dimension plots.
         """
         subset_sizes = conv_test_res["subset_sizes"]
-        X_to_Y_results = conv_test_res["X_to_Y"][:, :, :, Y_idx, X_idx]
-        Y_to_X_results = conv_test_res["Y_to_X"][:, :, :, X_idx, Y_idx]
+        X_to_Y_results = conv_test_res["X_to_Y"][:, :, :, X_idx, Y_idx]
+        Y_to_X_results = conv_test_res["Y_to_X"][:, :, :, Y_idx, X_idx]
 
         # Number of dimensions for Y and X
-        num_dimensions_Y = X_to_Y_results.shape[2]
-        num_dimensions_X = Y_to_X_results.shape[2]
+        num_dimensions_Y = (np.isnan(X_to_Y_results).sum(axis=(0,1)) == 0).sum()
+        num_dimensions_X = (np.isnan(Y_to_X_results).sum(axis=(0,1)) == 0).sum()
 
         # Generate color palettes dynamically based on the number of dimensions, avoiding light colors
         colors_X_to_Y = [cm.gray(0.2 + 0.6 * (i / (num_dimensions_Y - 1))) for i in range(num_dimensions_Y)]
@@ -196,12 +197,12 @@ class Visualizer:
                 plt.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"Y -> x{dim + 1}", color=colors_Y_to_X[dim])
 
         # Plot mean lines for emphasis with error bars for overall mean
-        mean_X_to_Y = X_to_Y_results.mean(axis=(1, 2))
-        std_X_to_Y = X_to_Y_results.mean(axis=2).std(axis=1) / np.sqrt(X_to_Y_results.shape[1])
+        mean_X_to_Y = np.nanmean(X_to_Y_results,axis=(1, 2))
+        std_X_to_Y = np.nanmean(X_to_Y_results,axis=2).std(axis=1) / np.sqrt(X_to_Y_results.shape[1])
         plt.errorbar(subset_sizes, mean_X_to_Y, yerr=std_X_to_Y, label="$Y|M_{X}$ (mean)", lw=2.5, color="black")
 
-        mean_Y_to_X = Y_to_X_results.mean(axis=(1, 2))
-        std_Y_to_X = Y_to_X_results.mean(axis=2).std(axis=1) / np.sqrt(Y_to_X_results.shape[1])
+        mean_Y_to_X = np.nanmean(Y_to_X_results,axis=(1, 2))
+        std_Y_to_X = np.nanmean(Y_to_X_results, axis=2).std(axis=1) / np.sqrt(Y_to_X_results.shape[1])
         plt.errorbar(subset_sizes, mean_Y_to_X, yerr=std_Y_to_X, label="$X|M_{Y}$ (mean)", lw=2.5, color="red")
 
         # Set plot properties
