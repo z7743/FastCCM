@@ -170,8 +170,8 @@ class Visualizer:
             plot_means_only (bool): If True, plots only the mean lines without individual dimension plots.
         """
         subset_sizes = conv_test_res["subset_sizes"]
-        X_to_Y_results = conv_test_res["X_to_Y"][:, :, :, X_idx, Y_idx]
-        Y_to_X_results = conv_test_res["Y_to_X"][:, :, :, Y_idx, X_idx]
+        X_to_Y_results = conv_test_res["X_to_Y"][:, :, :, Y_idx, X_idx]
+        Y_to_X_results = conv_test_res["Y_to_X"][:, :, :, X_idx, Y_idx]
 
         # Number of dimensions for Y and X
         num_dimensions_Y = (np.isnan(X_to_Y_results).sum(axis=(0,1)) == 0).sum()
