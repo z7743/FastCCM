@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from sklearn.decomposition import PCA
 
+
 def get_td_embeddings(ts, opt_E, opt_tau):
     ts_num = len(ts)
     tdembs = []
