@@ -108,11 +108,11 @@ class Functions:
         Finds the optimal embedding parameters (E and tau) for CCM.
 
         Parameters:
-            x (torch.Tensor): Input time series data (1-D).
-            x (torch.Tensor): Target time series data (1-D).
+            x (np.array): Input time series data (1-D).
+            y (np.array): Target time series data (1-D).
             E_range (np.array): Range of embedding dimensions to test.
             tau_range (np.array): Range of time delays to test.
-            tp_max (int): Maximum prediction interval for embedding.
+            tp_max (int): Maximum prediction interval.
             subset_size (int): Number of random samples of embeddings taken to approximate the manifold. Nearest neighbors for cross-mapping will be searched among this subset.
             subsample_size (int): Number of random samples of embeddings used to estimate prediction quality. Nearest neighbors for these samples will be searched.
             exclusion_rad (int): Exclusion radius to avoid selecting temporally close points from the subset.

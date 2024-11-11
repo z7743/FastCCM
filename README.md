@@ -16,9 +16,9 @@ To clone the repository and install the necessary dependencies, follow these ste
     pip install -r requirements.txt
     ```
 
-3. Install the package in editable mode:
+3. Install the package:
     ```bash
-    pip install -e .
+    pip install .
     ```
 
 ## Usage Examples

@@ -12,13 +12,6 @@ def load_csv_dataset(filename: str) -> pd.DataFrame:
         raise FileNotFoundError(f"File '{filename}' not found in datasets directory.")
     return pd.read_csv(filepath)
 
-def load_traffic_dataset() -> pd.DataFrame:
-    filename = "train_2.csv"
-    filepath = os.path.join(DATA_DIR, filename)
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"File '{filename}' not found in datasets directory.")
-    return pd.read_csv(filepath)
-
 def lorenz(t, state, sigma, beta, rho):
     """
     [ChatGPT written]
