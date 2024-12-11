@@ -12,29 +12,30 @@ class PairwiseCCM:
         self.device = device
 
 
-    def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, tp=0, method="simplex", **kwargs):
-    #def compute(self, X, Y, subset_size, subsample_size, exclusion_rad, tp=0, method="simplex",subtract_corr = False, **kwargs):
+    def compute(self, X, Y=None, subset_size=None, subsample_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
         """
         Main computation function for Convergent Cross Mapping (CCM).
 
         Parameters:
             X (list of np.array): List of embeddings from which to cross-map.
-            Y (list of np.array): List of embeddings to predict.
-            subset_size (int): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. Nearest neighbors for cross-mapping will be searched among this subset.
-            subsample_size (int): Number of random samples of embeddings to estimate prediction quality. Nearest neighbors for these samples will be searched.
+            Y (list of np.array or None): List of embeddings to predict. If None, set to be the same as X.
+            subset_size (int or None): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. If None, set to min_len. If "auto", set to min_len//2.
+            subsample_size (int or None): Number of random samples of embeddings to estimate prediction quality. If None, set to min_len. If "auto", set to min_len//6.
             exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
             tp (int): Interval of the prediction.
             method (str): Method to compute the prediction ("simplex", "smap").  
-            subtract_corr (bool): If true, the pairwise autocorrelation matrix is subtracted from the CCM result.
             nbrs_num (int, optional): Number of neighbors to consider for nearest neighbor calculations. Required if method is "simplex".
             theta (float, optional): Parameter controlling the degree of local weighting. Required if method is "smap".
 
         Returns:
             np.array: A matrix of correlation coefficients between the real and predicted states.
-        
+
         Raises:
             ValueError: If an invalid method is specified or if required parameters for the chosen method are not provided.
         """
+        if Y is None:
+            Y = X
+
         if method == "simplex":
             required_params = ["nbrs_num"]
         elif method == "smap":
@@ -43,10 +44,9 @@ class PairwiseCCM:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
         for param in required_params:
-                if param not in kwargs:
-                    raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
-                
-            
+            if param not in kwargs:
+                raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
+
         # Number of time series 
         num_ts_X = len(X)
         num_ts_Y = len(Y)
@@ -55,6 +55,17 @@ class PairwiseCCM:
         max_E_Y = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)]).max().item()
         # Max common length
         min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
+
+        # Handle subset_size and subsample_size
+        if subset_size is None:
+            subset_size = min_len
+        elif subset_size == "auto":
+            subset_size = min(min_len // 2, 700)
+
+        if subsample_size is None:
+            subsample_size = min_len
+        elif subsample_size == "auto":
+            subsample_size = min(min_len // 6, 250)
 
         # Random indices for sampling
         lib_indices = self.__get_random_indices(min_len - tp, subset_size)
@@ -63,25 +74,42 @@ class PairwiseCCM:
         # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
         X_lib = self.__get_random_sample(X, min_len, lib_indices, num_ts_X, max_E_X)
         X_sample = self.__get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E_X)
-        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices+tp, num_ts_Y, max_E_Y)
-        Y_sample_shifted = self.__get_random_sample(Y,min_len, smpl_indices+tp, num_ts_Y, max_E_Y)
-        
+        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices + tp, num_ts_Y, max_E_Y)
+        Y_sample_shifted = self.__get_random_sample(Y, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
+
         if method == "simplex":
             nbrs_num = kwargs["nbrs_num"]
             r_AB = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num)
         elif method == "smap":
             theta = kwargs["theta"]
             r_AB = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta)
-       
-        #if subtract_corr:
-        #    A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(min_len, max_E_X, num_ts_Y, num_ts_X)
-        #    B_ = torch.permute(X_sample,(1,2,0))[:,:,None,:].expand(min_len, max_E_Y, num_ts_Y, num_ts_X)
-        #    r_AB_ = self.__get_batch_corr(A_, B_)
-        #    r_AB -= r_AB_
-            
+
         return r_AB.to("cpu").numpy()
 
-    def predict(self, X, Y, subset_size, exclusion_rad, tp=0, method="simplex", **kwargs):
+
+    def predict(self, X, Y=None, subset_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
+        """
+        Prediction function for Convergent Cross Mapping (CCM).
+
+        Parameters:
+            X (list of np.array): List of embeddings from which to cross-map.
+            Y (list of np.array or None): List of embeddings to predict. If None, set to be the same as X.
+            subset_size (int or None): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. If None, set to min_len.
+            exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
+            tp (int): Interval of the prediction.
+            method (str): Method to compute the prediction ("simplex", "smap").  
+            nbrs_num (int, optional): Number of neighbors to consider for nearest neighbor calculations. Required if method is "simplex".
+            theta (float, optional): Parameter controlling the degree of local weighting. Required if method is "smap".
+
+        Returns:
+            np.array: Predictions for the target time series.
+
+        Raises:
+            ValueError: If an invalid method is specified or if required parameters for the chosen method are not provided.
+        """
+        if Y is None:
+            Y = X
+
         if method == "simplex":
             required_params = ["nbrs_num"]
         elif method == "smap":
@@ -90,10 +118,9 @@ class PairwiseCCM:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
         for param in required_params:
-                if param not in kwargs:
-                    raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
-                
-        
+            if param not in kwargs:
+                raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
+
         # Number of time series 
         num_ts_X = len(X)
         num_ts_Y = len(Y)
@@ -103,6 +130,10 @@ class PairwiseCCM:
         # Max common length
         min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
 
+        # Handle subset_size
+        if subset_size is None:
+            subset_size = min_len
+
         # Random indices for sampling
         lib_indices = self.__get_random_indices(min_len - tp, subset_size)
         smpl_indices = torch.arange(min_len - tp, device=self.device)
@@ -110,23 +141,18 @@ class PairwiseCCM:
         # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
         X_lib = self.__get_random_sample(X, min_len, lib_indices, num_ts_X, max_E_X)
         X_sample = self.__get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E_X)
-        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices+tp, num_ts_Y, max_E_Y)
-        Y_sample_shifted = self.__get_random_sample(Y,min_len, smpl_indices+tp, num_ts_Y, max_E_Y)
-        
+        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices + tp, num_ts_Y, max_E_Y)
+        Y_sample_shifted = self.__get_random_sample(Y, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
+
         if method == "simplex":
             nbrs_num = kwargs["nbrs_num"]
             _, pred = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, True)
         elif method == "smap":
             theta = kwargs["theta"]
             _, pred = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, True)
-            
-        #if subtract_corr:
-        #    A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(min_len, max_E_X, num_ts_Y, num_ts_X)
-        #    B_ = torch.permute(X_sample,(1,2,0))[:,:,None,:].expand(min_len, max_E_Y, num_ts_Y, num_ts_X)
-        #    r_AB_ = self.__get_batch_corr(A_, B_)
-        #    r_AB -= r_AB_
-            
+
         return pred.to("cpu").numpy()
+
 
 
     def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, return_pred=False):
