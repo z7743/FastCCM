@@ -12,7 +12,7 @@ class PairwiseCCM:
         self.device = device
 
 
-    def compute(self, X, Y=None, subset_size=None, subsample_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
+    def compute(self, X, Y=None, subset_size=None, subsample_size=None, exclusion_rad=1, tp=0, method="simplex", **kwargs):
         """
         Main computation function for Convergent Cross Mapping (CCM).
 
@@ -89,7 +89,7 @@ class PairwiseCCM:
         return r_AB.to("cpu").numpy()
 
 
-    def predict(self, X, Y=None, subset_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
+    def predict(self, X, Y=None, subset_size=None, exclusion_rad=1, tp=0, method="simplex", **kwargs):
         """
         Prediction function for Convergent Cross Mapping (CCM).
 
@@ -165,22 +165,24 @@ class PairwiseCCM:
         max_E_Y = Y_lib_shifted.shape[2]
 
         nbrs_num_max = nbrs_num.max().item()
-        nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
+        #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
 
         # Find indices of a neighbors of X_sample among X_lib
-        indices = self.__get_nbrs_indices(X_lib, X_sample, nbrs_num_max, lib_indices, smpl_indices, exclusion_rad)
+        weights, indices = self.__get_nbrs_indices_with_weights(X_lib, X_sample, nbrs_num, nbrs_num_max, lib_indices, smpl_indices, exclusion_rad)
         # Reshaping for comfortable usage
         I = indices.reshape(num_ts_X,-1).T 
+        
+        weights = torch.permute(weights,(1,2,0))[:,:,None,None].expand(-1,-1,max_E_Y, num_ts_Y,-1)
 
         # Pairwise crossmapping of all indices of embedding X to all embeddings of Y_shifted. Unreadble but optimized. 
         # Match every pair of Y_shifted i-th embedding with indices of X j-th 
-        #Y_lib_shifted_indexed = torch.permute(Y_lib_shifted,(1,2,0))[I[:, None,None, :],torch.arange(max_E_Y,device=self.device)[:,None,None], torch.arange(num_ts_Y,device=self.device)[None,:,None]]
         Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:,I],(1,3,0,2))
         
         # Average across nearest neighbors to get a prediction
         A = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
-        A[~nbrs_mask.T[None,:,None,None,:].expand(A.shape[0],-1,max_E_Y,num_ts_Y,-1)] = torch.nan
-        A = torch.nanmean(A,dim=1)
+        #A[~nbrs_mask.T[None,:,None,None,:].expand(A.shape[0],-1,max_E_Y,num_ts_Y,-1)] = torch.nan
+        #A = torch.nanmean(A,dim=1)
+        A = (A * weights).sum(axis=1)
 
         B = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
         
@@ -276,6 +278,31 @@ class PairwiseCCM:
             return indices_exc
         else:
             return indices
+        
+    def __get_nbrs_indices_with_weights(self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad):
+        eps = 1e-6
+        dist = torch.cdist(sample, lib)
+        # Find N + 2*excl_rad neighbors
+        near_dist, indices = torch.topk(dist, n_nbrs_max + 2 * exclusion_rad, largest=False)
+        
+        if exclusion_rad > 0:
+            # Mask out neighbors within the exclusion radius
+            mask = ~((lib_idx[indices] < (sample_idx[:, None] + exclusion_rad)) & 
+                    (lib_idx[indices] > (sample_idx[:, None] - exclusion_rad)))
+            # Select first n_nbrs_max neighbors outside exclusion radius
+            selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
+            indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
+            near_dist = near_dist[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
+        
+        # Calculate weights
+        near_dist_0 = near_dist[:, :, 0][:, :, None]
+        near_dist_0[near_dist_0 < eps] = eps
+        weights = torch.exp(-near_dist / near_dist_0)
+        weights *= (torch.arange(n_nbrs_max).unsqueeze(0) < n_nbrs.unsqueeze(1))[:, None, :].expand(-1, weights.shape[1], -1).to(float)
+        weights = weights / weights.sum(dim=2, keepdim=True)
+        
+        return weights, indices
+
 
     def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, theta):
         dist = torch.cdist(sublib,lib)

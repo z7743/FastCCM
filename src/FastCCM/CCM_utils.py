@@ -17,7 +17,7 @@ class Functions:
         self.ccm = PairwiseCCM(device=device)
 
 
-    def convergence_test(self, X, Y=None, subset_sizes="auto", subsample_size=None, exclusion_rad=0, tp=0, method="simplex", trials=10, **kwargs):
+    def convergence_test(self, X, Y=None, subset_sizes="auto", subsample_size=None, exclusion_rad=1, tp=0, method="simplex", trials=10, **kwargs):
         """
         Conducts a convergence test by calculating pairwise CCM for increasing subset sizes.
 
@@ -28,7 +28,7 @@ class Functions:
                 If "auto", set as logarithmically spaced values between max(max common length//100, 10) and max common length.
             subsample_size (int, None, or "auto"): Number of random samples of embeddings to estimate prediction quality. 
                 If None, set to max common length. If "auto", set to max common length//6.
-            exclusion_rad (int, optional): Exclusion radius to avoid temporally close points. Default is 0.
+            exclusion_rad (int, optional): Exclusion radius to avoid temporally close points. Default is 1.
             tp (int, optional): Prediction interval. Default is 0.
             method (str, optional): Prediction method ("simplex" or "smap"). Default is "simplex".
             trials (int, optional): Number of trials to run for each subset size. Default is 10.
@@ -87,7 +87,7 @@ class Functions:
             "Y_to_X": np.array(res_Y_to_X)
         }
 
-    def prediction_interval_test(self, x, y, subset_size="auto", subsample_size="auto", max_tp=1, exclusion_rad=0, method="simplex", **kwargs):
+    def prediction_interval_test(self, x, y, subset_size="auto", subsample_size="auto", max_tp=1, exclusion_rad=1, method="simplex", **kwargs):
         """
         Calculates CCM for different prediction intervals (tp).
 
@@ -96,7 +96,7 @@ class Functions:
             y (torch.Tensor): Target time series data embedding (target).
             subset_size (int, None, or "auto"): Number of random samples of embeddings taken to approximate the manifold.
             subsample_size (int, None, or "auto"): Number of random samples of embeddings used to estimate prediction quality.
-            exclusion_rad (int, optional): Exclusion radius to avoid selecting temporally close points from the subset. Default is 0.
+            exclusion_rad (int, optional): Exclusion radius to avoid selecting temporally close points from the subset. Default is 1.
             max_tp (int, optional): Maximum prediction interval to test. Default is 1.
             method (str, optional): Method to compute the prediction ("simplex" or "smap"). Default is "simplex".
             **kwargs: Additional parameters for CCM, including:
@@ -122,7 +122,7 @@ class Functions:
             "X_to_Y": np.array(res),
         }
 
-    def find_optimal_embedding_params(self, x, y=None, subset_size="auto", subsample_size="auto", exclusion_rad=0, E_range=np.arange(1,10,1), tau_range=np.arange(1,10,1), tp_max=1,  method="simplex", trials=10, **kwargs):
+    def find_optimal_embedding_params(self, x, y=None, subset_size="auto", subsample_size="auto", exclusion_rad=1, E_range=np.arange(1,10,1), tau_range=np.arange(1,10,1), tp_max=1,  method="simplex", trials=10, **kwargs):
         """
         Finds the optimal embedding parameters (E and tau) for CCM.
 
@@ -133,7 +133,7 @@ class Functions:
                 If "auto", defaults to max common length // 2. If None, defaults to the length of the shorter series.
             subsample_size (int, None, or "auto"): Number of random samples of embeddings used to estimate prediction quality.
                 If "auto", defaults to max common length // 6. If None, defaults to the length of the shorter series.
-            exclusion_rad (int, optional): Exclusion radius to avoid selecting temporally close points from the subset. Default is 0.
+            exclusion_rad (int, optional): Exclusion radius to avoid selecting temporally close points from the subset. Default is 1.
             E_range (np.array, optional): Range of embedding dimensions (E) to test. Default is np.arange(1, 10, 1).
             tau_range (np.array, optional): Range of time delays (tau) to test. Default is np.arange(1, 10, 1).
             tp_max (int, optional): Maximum prediction interval for delayed target embedding. Default is 1.
