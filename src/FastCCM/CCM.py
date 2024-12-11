@@ -298,7 +298,7 @@ class PairwiseCCM:
         near_dist_0 = near_dist[:, :, 0][:, :, None]
         near_dist_0[near_dist_0 < eps] = eps
         weights = torch.exp(-near_dist / near_dist_0)
-        weights *= (torch.arange(n_nbrs_max).unsqueeze(0) < n_nbrs.unsqueeze(1))[:, None, :].expand(-1, weights.shape[1], -1).to(float)
+        weights *= (torch.arange(n_nbrs_max,device=self.device).unsqueeze(0) < n_nbrs.unsqueeze(1))[:, None, :].expand(-1, weights.shape[1], -1).to(float)
         weights = weights / weights.sum(dim=2, keepdim=True)
         
         return weights, indices
