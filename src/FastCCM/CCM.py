@@ -12,7 +12,7 @@ class PairwiseCCM:
         self.device = device
 
 
-    def compute(self, X, Y=None, subset_size=None, subsample_size=None, exclusion_rad=1, tp=0, method="simplex", **kwargs):
+    def compute(self, X, Y=None, subset_size=None, subsample_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
         """
         Main computation function for Convergent Cross Mapping (CCM).
 
@@ -89,7 +89,7 @@ class PairwiseCCM:
         return r_AB.to("cpu").numpy()
 
 
-    def predict(self, X, Y=None, subset_size=None, exclusion_rad=1, tp=0, method="simplex", **kwargs):
+    def predict(self, X, Y=None, subset_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
         """
         Prediction function for Convergent Cross Mapping (CCM).
 
@@ -283,7 +283,7 @@ class PairwiseCCM:
         eps = 1e-6
         dist = torch.cdist(sample, lib)
         # Find N + 2*excl_rad neighbors
-        near_dist, indices = torch.topk(dist, n_nbrs_max + 2 * exclusion_rad, largest=False)
+        near_dist, indices = torch.topk(dist, 1 + n_nbrs_max + 2 * exclusion_rad, largest=False)
         
         if exclusion_rad > 0:
             # Mask out neighbors within the exclusion radius
@@ -293,7 +293,14 @@ class PairwiseCCM:
             selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
             indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
             near_dist = near_dist[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
-        
+
+        elif exclusion_rad == 0:
+            mask = ~(lib_idx[indices] == sample_idx[:, None])
+            # Select first n_nbrs_max neighbors outside exclusion radius
+            selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
+            indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
+            near_dist = near_dist[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
+
         # Calculate weights
         near_dist_0 = near_dist[:, :, 0][:, :, None]
         near_dist_0[near_dist_0 < eps] = eps
