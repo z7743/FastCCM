@@ -36,25 +36,28 @@ class PairwiseCCM:
         if Y is None:
             Y = X
 
-        if method == "simplex":
-            required_params = ["nbrs_num"]
-        elif method == "smap":
-            required_params = ["theta"]
-        else:
-            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
-
-        for param in required_params:
-            if param not in kwargs:
-                raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
-
         # Number of time series 
         num_ts_X = len(X)
         num_ts_Y = len(Y)
         # Max embedding dimension
-        max_E_X = torch.tensor([X[i].shape[-1] for i in range(num_ts_X)]).max().item()
-        max_E_Y = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)]).max().item()
+        max_E_X = torch.tensor([X[i].shape[-1] for i in range(num_ts_X)], device=self.device).max().item()
+        max_E_Y = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
         # Max common length
-        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
+        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)], device=self.device).min().item()
+
+
+        if method == "simplex":
+            if "nbrs_num" in kwargs:
+                nbrs_num = kwargs["nbrs_num"]
+                #if isinstance(nbrs_num, int):
+                nbrs_num = torch.tensor([nbrs_num] * num_ts_X, device=self.device)
+            else:
+                nbrs_num = torch.tensor([X[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
+        elif method == "smap":
+            theta = kwargs.get("theta", 5)  # Default theta to 5
+        else:
+            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
+
 
         # Handle subset_size and subsample_size
         if subset_size is None:
@@ -78,10 +81,8 @@ class PairwiseCCM:
         Y_sample_shifted = self.__get_random_sample(Y, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
 
         if method == "simplex":
-            nbrs_num = kwargs["nbrs_num"]
             r_AB = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num)
         elif method == "smap":
-            theta = kwargs["theta"]
             r_AB = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta)
 
         return r_AB.to("cpu").numpy()
@@ -110,17 +111,6 @@ class PairwiseCCM:
         if Y is None:
             Y = X
 
-        if method == "simplex":
-            required_params = ["nbrs_num"]
-        elif method == "smap":
-            required_params = ["theta"]
-        else:
-            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
-
-        for param in required_params:
-            if param not in kwargs:
-                raise ValueError(f"For method {method}, parameter '{param}' must be specified.")
-
         # Number of time series 
         num_ts_X = len(X)
         num_ts_Y = len(Y)
@@ -130,9 +120,23 @@ class PairwiseCCM:
         # Max common length
         min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
 
+        if method == "simplex":
+            if "nbrs_num" in kwargs:
+                nbrs_num = kwargs["nbrs_num"]
+                #if isinstance(nbrs_num, int):
+                nbrs_num = torch.tensor([nbrs_num] * num_ts_X, device=self.device)
+            else:
+                nbrs_num = torch.tensor([X[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
+        elif method == "smap":
+            theta = kwargs.get("theta", 5)  # Default theta to 5
+        else:
+            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
+
         # Handle subset_size
         if subset_size is None:
             subset_size = min_len
+        elif subset_size == "auto":
+            subset_size = min(min_len // 2, 700)
 
         # Random indices for sampling
         lib_indices = self.__get_random_indices(min_len - tp, subset_size)
@@ -145,10 +149,8 @@ class PairwiseCCM:
         Y_sample_shifted = self.__get_random_sample(Y, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
 
         if method == "simplex":
-            nbrs_num = kwargs["nbrs_num"]
             _, pred = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, True)
         elif method == "smap":
-            theta = kwargs["theta"]
             _, pred = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, True)
 
         return pred.to("cpu").numpy()
@@ -160,8 +162,11 @@ class PairwiseCCM:
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
 
+        nbrs_num_max = nbrs_num.max().item()
+        nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
+
         # Find indices of a neighbors of X_sample among X_lib
-        indices = self.__get_nbrs_indices(X_lib, X_sample, nbrs_num, lib_indices, smpl_indices, exclusion_rad)
+        indices = self.__get_nbrs_indices(X_lib, X_sample, nbrs_num_max, lib_indices, smpl_indices, exclusion_rad)
         # Reshaping for comfortable usage
         I = indices.reshape(num_ts_X,-1).T 
 
@@ -171,7 +176,10 @@ class PairwiseCCM:
         Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:,I],(1,3,0,2))
         
         # Average across nearest neighbors to get a prediction
-        A = Y_lib_shifted_indexed.reshape(-1, nbrs_num, max_E_Y, num_ts_Y, num_ts_X).mean(axis=1)
+        A = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
+        A[~nbrs_mask.T[None,:,None,None,:].expand(A.shape[0],-1,max_E_Y,num_ts_Y,-1)] = torch.nan
+        A = torch.nanmean(A,dim=1)
+
         B = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
         
         # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X 
