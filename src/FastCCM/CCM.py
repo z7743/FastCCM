@@ -19,13 +19,14 @@ class PairwiseCCM:
         Parameters:
             X (list of np.array): List of embeddings from which to cross-map.
             Y (list of np.array or None): List of embeddings to predict. If None, set to be the same as X.
-            subset_size (int or None): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. If None, set to min_len. If "auto", set to min_len//2.
-            subsample_size (int or None): Number of random samples of embeddings to estimate prediction quality. If None, set to min_len. If "auto", set to min_len//6.
+            subset_size (int or None): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. If None, set to max common length. If "auto", set to max common length//2.
+            subsample_size (int or None): Number of random samples of embeddings to estimate prediction quality. If None, set to max common length. If "auto", set to max common length//6.
             exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
             tp (int): Interval of the prediction.
             method (str): Method to compute the prediction ("simplex", "smap").  
-            nbrs_num (int, optional): Number of neighbors to consider for nearest neighbor calculations. Required if method is "simplex".
-            theta (float, optional): Parameter controlling the degree of local weighting. Required if method is "smap".
+            **kwargs: Additional parameters for CCM, including:
+                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
+                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
 
         Returns:
             np.array: A matrix of correlation coefficients between the real and predicted states.
@@ -99,8 +100,9 @@ class PairwiseCCM:
             exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
             tp (int): Interval of the prediction.
             method (str): Method to compute the prediction ("simplex", "smap").  
-            nbrs_num (int, optional): Number of neighbors to consider for nearest neighbor calculations. Required if method is "simplex".
-            theta (float, optional): Parameter controlling the degree of local weighting. Required if method is "smap".
+            **kwargs: Additional parameters for CCM, including:
+                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
+                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
 
         Returns:
             np.array: Predictions for the target time series.
