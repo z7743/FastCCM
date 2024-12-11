@@ -125,7 +125,8 @@ class Functions:
                 
         # Prepare embeddings and compute CCM for each tau and E combination
         X_emb = np.concatenate([np.array([get_td_embedding_np(x[:-tp_max,None],e,tau)[:,:,0] for e in E_range],dtype=object) for tau in tau_range])
-        Y_emb = np.array([y[:i, None] for i in range(-(tp_max),-1)],dtype=object)
+        Y_emb = [y[:(y.shape[0]+i), None] for i in np.arange(-(tp_max)+1,1)]
+        
         res = np.mean([self.ccm.compute(X_emb,Y_emb,
                                subset_size=subset_size,
                                subsample_size=subsample_size,
@@ -133,7 +134,7 @@ class Functions:
                                tp=0,
                                subtract_corr=False,
                                method=method,
-                               **kwargs)[0].reshape(tp_max-1,tau_range.shape[0],E_range.shape[0],) for exp in range(trials)],axis=0)
+                               **kwargs)[0].reshape(tp_max,tau_range.shape[0],E_range.shape[0],) for exp in range(trials)],axis=0)
         
 
         # Find optimal tau and E for this set
@@ -157,7 +158,7 @@ class Visualizer:
         """
         pass
 
-    def plot_convergence_test(self, conv_test_res, X_idx=0, Y_idx=0, xscale="log", plot_means_only=False):
+    def plot_convergence_test(self, conv_test_res, X_idx=0, Y_idx=0, xscale="log", plot_means_only=False, ax=None):
         """
         Plots the results of a convergence test with error bars representing trial variability.
         Allows customization of the X-axis scale and an option to plot only mean lines.
@@ -180,39 +181,42 @@ class Visualizer:
         # Generate color palettes dynamically based on the number of dimensions, avoiding light colors
         colors_X_to_Y = [cm.gray(0.2 + 0.6 * (i / (num_dimensions_Y - 1))) for i in range(num_dimensions_Y)]
         colors_Y_to_X = [cm.Reds(0.2 + 0.6 * (i / (num_dimensions_X - 1))) for i in range(num_dimensions_X)]
-
-        plt.figure(figsize=(10, 6))
+        
+        if ax == None:  
+            fig, ax = plt.subplots(figsize=(10, 6))
 
         if not plot_means_only:
             # Plot results for (x1, x2, x3) -> y1, y2, y3 with dynamically generated colors and error bars
             for dim in range(num_dimensions_Y):
                 mean_values = X_to_Y_results.mean(axis=1)[:, dim]
                 std_errors = X_to_Y_results.std(axis=1)[:, dim] / np.sqrt(X_to_Y_results.shape[1])  # Standard error of the mean
-                plt.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"X -> y{dim + 1}", color=colors_X_to_Y[dim])
+                ax.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"X -> y{dim + 1}", color=colors_X_to_Y[dim])
 
             # Plot results for (y1, y2, y3) -> x1, x2, x3 with dynamically generated colors and error bars
             for dim in range(num_dimensions_X):
                 mean_values = Y_to_X_results.mean(axis=1)[:, dim]
                 std_errors = Y_to_X_results.std(axis=1)[:, dim] / np.sqrt(Y_to_X_results.shape[1])  # Standard error of the mean
-                plt.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"Y -> x{dim + 1}", color=colors_Y_to_X[dim])
+                ax.errorbar(subset_sizes, mean_values, yerr=std_errors, linestyle="--", label=f"Y -> x{dim + 1}", color=colors_Y_to_X[dim])
 
         # Plot mean lines for emphasis with error bars for overall mean
         mean_X_to_Y = np.nanmean(X_to_Y_results,axis=(1, 2))
         std_X_to_Y = np.nanmean(X_to_Y_results,axis=2).std(axis=1) / np.sqrt(X_to_Y_results.shape[1])
-        plt.errorbar(subset_sizes, mean_X_to_Y, yerr=std_X_to_Y, label="$Y|M_{X}$ (mean)", lw=2.5, color="black")
+        ax.errorbar(subset_sizes, mean_X_to_Y, yerr=std_X_to_Y, label="$Y|M_{X}$ (mean)", lw=2.5, color="black")
 
         mean_Y_to_X = np.nanmean(Y_to_X_results,axis=(1, 2))
         std_Y_to_X = np.nanmean(Y_to_X_results, axis=2).std(axis=1) / np.sqrt(Y_to_X_results.shape[1])
-        plt.errorbar(subset_sizes, mean_Y_to_X, yerr=std_Y_to_X, label="$X|M_{Y}$ (mean)", lw=2.5, color="red")
+        ax.errorbar(subset_sizes, mean_Y_to_X, yerr=std_Y_to_X, label="$X|M_{Y}$ (mean)", lw=2.5, color="red")
 
-        # Set plot properties
-        plt.xscale(xscale)  # Set the X-axis scale to "log" or "linear"
-        plt.xlabel("Library Size")
-        plt.ylabel("Pearson Correlation Coefficient")
-        plt.title("Convergence Test Visualization" if not plot_means_only else "Convergence Test: Mean Only")
-        plt.grid(True)
-        plt.legend()
-        plt.show()
+        
+        ax.set_xscale(xscale)  # Set the X-axis scale to "log" or "linear"
+        ax.set_xlabel("Library Size")
+        ax.set_ylabel("Pearson Correlation Coefficient")
+        ax.set_title("Convergence Test Visualization" if not plot_means_only else "Convergence Test: Mean Only")
+        ax.grid(True)
+        ax.legend()
+
+        return ax
+
 
     def visualize_optimal_e_tau(self, optimal_E_tau_res):
         """

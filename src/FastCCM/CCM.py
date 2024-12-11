@@ -105,7 +105,6 @@ class PairwiseCCM:
 
         # Random indices for sampling
         lib_indices = self.__get_random_indices(min_len - tp, subset_size)
-        #smpl_indices = self.__get_random_indices(min_len - tp, subsample_size)
         smpl_indices = torch.arange(min_len - tp, device=self.device)
 
         # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
@@ -120,7 +119,7 @@ class PairwiseCCM:
         elif method == "smap":
             theta = kwargs["theta"]
             _, pred = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, True)
-       
+            
         #if subtract_corr:
         #    A_ = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(min_len, max_E_X, num_ts_Y, num_ts_X)
         #    B_ = torch.permute(X_sample,(1,2,0))[:,:,None,:].expand(min_len, max_E_Y, num_ts_Y, num_ts_X)
