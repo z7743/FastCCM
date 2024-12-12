@@ -289,6 +289,7 @@ class PairwiseCCM:
             # Mask out neighbors within the exclusion radius
             mask = ~((lib_idx[indices] < (sample_idx[:, None] + exclusion_rad)) & 
                     (lib_idx[indices] > (sample_idx[:, None] - exclusion_rad)))
+            
             # Select first n_nbrs_max neighbors outside exclusion radius
             selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
             indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
@@ -296,6 +297,7 @@ class PairwiseCCM:
 
         elif exclusion_rad == 0:
             mask = ~(lib_idx[indices] == sample_idx[:, None])
+
             # Select first n_nbrs_max neighbors outside exclusion radius
             selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
             indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
@@ -305,6 +307,7 @@ class PairwiseCCM:
         near_dist_0 = near_dist[:, :, 0][:, :, None]
         near_dist_0[near_dist_0 < eps] = eps
         weights = torch.exp(-near_dist / near_dist_0)
+
         weights *= (torch.arange(n_nbrs_max,device=self.device).unsqueeze(0) < n_nbrs.unsqueeze(1))[:, None, :].expand(-1, weights.shape[1], -1).to(float)
         weights = weights / weights.sum(dim=2, keepdim=True)
         
