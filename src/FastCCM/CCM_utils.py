@@ -47,11 +47,19 @@ class Functions:
         min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
 
         # Handle subset_sizes
-        if subset_sizes == "auto":
-            subset_sizes = np.unique(np.logspace(max(np.log10(min_len // 100),np.log10(10)), np.log10(min_len), num=10, dtype=int)).tolist() #[min_len // i for i in range(10, 0, -1)]
+        if isinstance(subset_sizes, str) and subset_sizes == "auto":
+            subset_sizes = np.unique(
+                np.logspace(
+                    max(np.log10(min_len // 100), np.log10(10)), 
+                    np.log10(min_len), 
+                    num=10, 
+                    dtype=int
+                )
+            ).tolist()
         elif not isinstance(subset_sizes, (list, np.ndarray)):
-            raise ValueError("subset_sizes must be either 'auto' or a list of integers.")
+            raise ValueError("subset_sizes must be either 'auto', a list, or a numpy array.")
 
+            
         res_X_to_Y = []
         res_Y_to_X = []
 
