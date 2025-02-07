@@ -7,3 +7,4 @@ notebooks/traffic_results
 src/FastCCM.egg-info
 notebooks/bitcoin_price_data.csv
 notebooks/test.ipynb
+build
