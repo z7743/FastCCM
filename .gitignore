@@ -4,6 +4,7 @@ notebooks/.ipynb_checkpoints
 .ipynb_checkpoints
 .pytest_cache
 notebooks/traffic_results
+notebooks/llm_results
 src/FastCCM.egg-info
 notebooks/bitcoin_price_data.csv
 notebooks/test.ipynb
