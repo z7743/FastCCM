@@ -89,7 +89,8 @@ class PairwiseCCM:
         return r_AB.to("cpu").numpy()
 
 
-    def predict(self, X, Y=None, subset_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
+    def predict(self, X_lib, Y_lib=None, X_pred=None, subset_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
+        #TODO: Is there really a case where pairwise prediction is needed? Probably move to another class 
         """
         Prediction function for Convergent Cross Mapping (CCM).
 
@@ -110,17 +111,21 @@ class PairwiseCCM:
         Raises:
             ValueError: If an invalid method is specified or if required parameters for the chosen method are not provided.
         """
-        if Y is None:
-            Y = X
+        if Y_lib is None:
+            Y_lib = X_lib
+
+        if X_pred is None:
+            X_pred = X_lib
 
         # Number of time series 
-        num_ts_X = len(X)
-        num_ts_Y = len(Y)
+        num_ts_X = len(X_lib)
+        num_ts_Y = len(Y_lib)
         # Max embedding dimension
-        max_E_X = torch.tensor([X[i].shape[-1] for i in range(num_ts_X)]).max().item()
-        max_E_Y = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)]).max().item()
+        max_E_X = torch.tensor([X_lib[i].shape[-1] for i in range(num_ts_X)]).max().item()
+        max_E_Y = torch.tensor([Y_lib[i].shape[-1] for i in range(num_ts_Y)]).max().item()
         # Max common length
-        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
+        min_len_lib = torch.tensor([Y_lib[i].shape[0] for i in range(num_ts_Y)] + [X_lib[i].shape[0] for i in range(num_ts_X)]).min().item()
+        min_len_pred = torch.tensor([X_pred[i].shape[0] for i in range(num_ts_X)]).min().item()
 
         if method == "simplex":
             if "nbrs_num" in kwargs:
@@ -128,7 +133,7 @@ class PairwiseCCM:
                 #if isinstance(nbrs_num, int):
                 nbrs_num = torch.tensor([nbrs_num] * num_ts_X, device=self.device)
             else:
-                nbrs_num = torch.tensor([X[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
+                nbrs_num = torch.tensor([X_lib[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
         elif method == "smap":
             theta = kwargs.get("theta", 5)  # Default theta to 5
         else:
@@ -136,24 +141,28 @@ class PairwiseCCM:
 
         # Handle subset_size
         if subset_size is None:
-            subset_size = min_len
+            subset_size = min_len_lib
         elif subset_size == "auto":
-            subset_size = min(min_len // 2, 700)
+            subset_size = min(min_len_lib // 2, 700)
+
+        #=======================================================#
 
         # Random indices for sampling
-        lib_indices = self.__get_random_indices(min_len - tp, subset_size)
-        smpl_indices = torch.arange(min_len - tp, device=self.device)
+        lib_indices = self.__get_random_indices(min_len_lib - tp, subset_size)
+        smpl_indices = torch.arange(min_len_pred - tp, device=self.device)
 
         # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
-        X_lib = self.__get_random_sample(X, min_len, lib_indices, num_ts_X, max_E_X)
-        X_sample = self.__get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E_X)
-        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices + tp, num_ts_Y, max_E_Y)
-        Y_sample_shifted = self.__get_random_sample(Y, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
+        X_subset = self.__get_random_sample(X_lib, min_len_lib, lib_indices, num_ts_X, max_E_X)
+        X_sample = self.__get_random_sample(X_pred, min_len_pred, smpl_indices, num_ts_X, max_E_X)
+        Y_subset_shifted = self.__get_random_sample(Y_lib, min_len_lib, lib_indices + tp, num_ts_Y, max_E_Y)
+        #Y_sample_shifted = self.__get_random_sample(Y_pred, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
 
+        #TODO: smpl_indices if X_pred is not None should not intersect with lib_indices
+        
         if method == "simplex":
-            _, pred = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, True)
+            pred = self.__simplex_prediction(lib_indices, smpl_indices, X_subset, X_sample, Y_subset_shifted, None, exclusion_rad, nbrs_num, True)
         elif method == "smap":
-            _, pred = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, True)
+            pred = self.__smap_prediction(lib_indices, smpl_indices, X_subset, X_sample, Y_subset_shifted, None, exclusion_rad, theta, True)
 
         return pred.to("cpu").numpy()
 
@@ -183,6 +192,9 @@ class PairwiseCCM:
         #A[~nbrs_mask.T[None,:,None,None,:].expand(A.shape[0],-1,max_E_Y,num_ts_Y,-1)] = torch.nan
         #A = torch.nanmean(A,dim=1)
         A = (A * weights).sum(axis=1)
+
+        if (Y_sample_shifted is None) and return_pred:
+            return A
 
         B = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
         
@@ -235,6 +247,9 @@ class PairwiseCCM:
 
         A = torch.bmm(X_, beta).reshape(num_ts_X, num_ts_Y, subsample_size, max_E_Y)
         A = torch.permute(A,(2,3,1,0))
+
+        if (Y_sample_shifted is None) and return_pred:
+            return A
 
         B = torch.permute(Y_sample_shifted,(1,2,0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X)
         #TODO: test whether B = sample_y.unsqueeze(-2).expand(sample_size, E_y, dim, dim)
