@@ -1,3 +1,5 @@
+# ccm.py
+
 import torch
 
 class PairwiseCCM:
@@ -149,7 +151,7 @@ class PairwiseCCM:
 
         # Random indices for sampling
         lib_indices = self.__get_random_indices(min_len_lib - tp, subset_size)
-        smpl_indices = torch.arange(min_len_pred - tp, device=self.device)
+        smpl_indices = torch.arange(min_len_pred, device=self.device)
 
         # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
         X_subset = self.__get_random_sample(X_lib, min_len_lib, lib_indices, num_ts_X, max_E_X)

@@ -1,3 +1,4 @@
+# utils/utils.py
 import torch
 import numpy as np
 from sklearn.decomposition import PCA
@@ -68,65 +69,6 @@ def get_td_embedding_specified(time_series, delays):
     return embedded
 
 
-def calculate_correlation_dimension_(embedded_data, radii=None, device="cpu"):
-    """
-    ChatGPT writen
-
-    Calculate the correlation dimension for a given embedded dataset using the Grassberger-Procaccia algorithm,
-    rewritten to utilize GPU with PyTorch.
-
-    Parameters:
-        embedded_data (torch.Tensor): The pre-embedded input dataset on the GPU.
-        radii (torch.Tensor): Optional tensor of radius values to use for correlation sum calculation.
-
-    Returns:
-        float: Estimated correlation dimension.
-    """
-    # Ensure embedded data is on GPU
-    embedded_data = torch.tensor(embedded_data,device=device)
-
-    # Calculate pairwise distances using PyTorch
-    diff = embedded_data.unsqueeze(1) - embedded_data.unsqueeze(0)
-    distance_matrix = torch.sqrt((diff ** 2).sum(-1))
-
-    # Flatten and filter the distance matrix to get relevant quantiles
-    distances = distance_matrix.flatten()
-    nonzero_distances = distances[distances != 0]
-    q1, q2 = torch.quantile(nonzero_distances, 0.001), torch.quantile(nonzero_distances, 0.999)
-    a = torch.log2(q1) - 2
-    b = torch.log2(q2) + 2
-
-    # Calculate radii if not provided
-    if radii is None:
-        radii = torch.logspace(a.item(), b.item(), 100, base=2, device=device)
-
-    # Calculate correlation sums
-    correlation_sums = [(distance_matrix < r).float().mean() for r in radii]
-
-    # Logarithm of radii and correlation sums
-    log_r = torch.log(radii)
-    log_C_r = torch.log(torch.tensor(correlation_sums, device=device))
-
-    # Applying mask and linear regression as per the original method
-    thr = (log_C_r.max() - log_C_r.min()) / 20
-    mask = (log_C_r > (log_C_r.min() + 1 * thr)) & (log_C_r < (log_C_r.max() - 10 * thr))
-
-    # Apply mask
-    log_r_masked = log_r[mask]
-    log_C_r_masked = log_C_r[mask]
-
-    # Create the design matrix for linear regression
-    X = torch.stack([log_r_masked, torch.ones_like(log_r_masked)], dim=1).to(device)
-    Y = log_C_r_masked.unsqueeze(1)
-
-    # Compute (X^T * X)^(-1) * X^T * Y
-    XTX_inv_XT = torch.linalg.pinv(X.T @ X) @ X.T
-    beta = XTX_inv_XT @ Y
-
-    # The slope is the first component of beta
-    slope = beta[0].item()
-    return slope
-
 def calculate_correlation_dimension(embedded_data, radii=None):
     """
     Grassberger–Procaccia correlation dimension (standard):
@@ -157,7 +99,7 @@ def calculate_correlation_dimension(embedded_data, radii=None):
     if N < 3:
         raise ValueError("Need at least 3 points.")
 
-    # internal chunk sizes (kept small to avoid memory blow-up in high M)
+    # internal chunk sizes 
     ROW_BS = 2048
     FEAT_BS = 1024
 

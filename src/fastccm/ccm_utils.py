@@ -1,7 +1,8 @@
+# ccm_utils.py
 import torch
 import numpy as np
-from FastCCM.CCM import PairwiseCCM
-from FastCCM.utils.utils import get_td_embedding_np
+from fastccm.ccm import PairwiseCCM
+from fastccm.utils.utils import get_td_embedding_np
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
