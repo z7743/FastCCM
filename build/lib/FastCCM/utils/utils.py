@@ -68,7 +68,7 @@ def get_td_embedding_specified(time_series, delays):
     return embedded
 
 
-def calculate_correlation_dimension(embedded_data, radii=None, device="cpu"):
+def calculate_correlation_dimension_(embedded_data, radii=None, device="cpu"):
     """
     ChatGPT writen
 
@@ -127,6 +127,166 @@ def calculate_correlation_dimension(embedded_data, radii=None, device="cpu"):
     slope = beta[0].item()
     return slope
 
+def calculate_correlation_dimension(embedded_data, radii=None):
+    """
+    Grassberger–Procaccia correlation dimension (standard):
+      - counts unique unordered pairs (i<j)
+      - excludes the diagonal (no self-pairs)
+
+    Parameters
+    ----------
+    embedded_data : array-like or torch.Tensor, shape (N, M)
+        Point cloud (e.g., time-delay embedded series).
+    radii : torch.Tensor of shape (R,), optional
+        Radii (distance units). If None, a robust log-spaced grid is chosen from pairwise-distance quantiles.
+
+    Returns
+    -------
+    float
+        Estimated slope of log C(r) vs log r (correlation dimension).
+    """
+    # --- setup ---
+    X0 = torch.as_tensor(embedded_data)
+    device = X0.device
+    X = X0.to(device=device, dtype=torch.float32,
+              copy=(X0.device != device or X0.dtype != torch.float32)).contiguous()
+
+    if X.ndim != 2:
+        raise ValueError("embedded_data must have shape (N, M).")
+    N, M = X.shape
+    if N < 3:
+        raise ValueError("Need at least 3 points.")
+
+    # internal chunk sizes (kept small to avoid memory blow-up in high M)
+    ROW_BS = 2048
+    FEAT_BS = 1024
+
+    # --- helpers: compute distances in feature chunks (no (N,N,M) tensors) ---
+    def row_sqnorms(A: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(A.shape[0], dtype=torch.float64, device=device)
+        for k in range(0, A.shape[1], FEAT_BS):
+            Ak = A[:, k:k+FEAT_BS].to(torch.float64)
+            out += (Ak * Ak).sum(dim=1)
+        return out  # (a,)
+
+    def pairwise_sqdist(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        A2 = row_sqnorms(A)[:, None]          # (a,1)
+        B2 = row_sqnorms(B)[None, :]          # (1,b)
+        D2 = A2 + B2
+        for k in range(0, A.shape[1], FEAT_BS):
+            Ak = A[:, k:k+FEAT_BS].to(torch.float64)
+            Bk = B[:, k:k+FEAT_BS].to(torch.float64)
+            D2 -= 2.0 * (Ak @ Bk.T)           # (a,b)
+        D2.clamp_(min=0)
+        return D2  # (a,b) float64
+
+    # --- choose radii if not provided: sample unordered pair distances for quantiles ---
+    if radii is None:
+        s = min(4096, N)
+        idx = torch.randperm(N, device=device)[:s]
+        S = X[idx]
+
+        sampled = []
+        total = 0
+        target = min(2_000_000, (s * (s - 1)) // 2)
+        inner = min(ROW_BS, s)
+
+        for i in range(0, s, inner):
+            Ai = S[i:i+inner]
+            for j in range(i, s, inner):
+                Bj = S[j:j+inner]
+                D2 = pairwise_sqdist(Ai, Bj)
+                if i == j:
+                    # keep upper triangle only (exclude diagonal)
+                    a = D2.shape[0]
+                    if a > 1:
+                        tri = torch.triu_indices(a, a, offset=1, device=device)
+                        d = D2[tri[0], tri[1]]
+                    else:
+                        d = D2.new_empty((0,), dtype=D2.dtype)
+                else:
+                    d = D2.flatten()
+                sampled.append(d)
+                total += d.numel()
+                if total >= target:
+                    break
+            if total >= target:
+                break
+
+        samp = torch.cat(sampled) if sampled else torch.tensor([], device=device, dtype=torch.float64)
+        if samp.numel() == 0:
+            # fallback: rough scale from norms
+            norms = row_sqnorms(S).sqrt()
+            med = norms.median() if norms.numel() else torch.tensor(1.0, device=device, dtype=torch.float64)
+            q1, q2 = med * 1e-3, med * 1e+3
+        else:
+            d = samp.sqrt()
+            q1, q2 = torch.quantile(d, 0.001), torch.quantile(d, 0.999)
+            if not torch.isfinite(q1) or not torch.isfinite(q2) or q1 <= 0 or q2 <= q1:
+                med = torch.median(d)
+                q1, q2 = med * 1e-3, med * 1e+3
+
+        a = torch.log2(q1) - 2.0
+        b = torch.log2(q2) + 2.0
+        radii = torch.logspace(a.item(), b.item(), steps=100, base=2.0, device=device, dtype=torch.float32)
+
+    radii = radii.to(device=device, dtype=torch.float32)
+    R = radii.numel()
+    radii2 = (radii.to(torch.float64) ** 2)
+
+    # --- count unordered pairs (i<j), exclude diagonal ---
+    counts = torch.zeros(R, dtype=torch.int64, device=device)
+    for i in range(0, N, ROW_BS):
+        i_end = min(i + ROW_BS, N)
+        Ai = X[i:i_end]
+        for j in range(i, N, ROW_BS):
+            j_end = min(j + ROW_BS, N)
+            Bj = X[j:j_end]
+            D2 = pairwise_sqdist(Ai, Bj)
+
+            if i == j:
+                # exclude self-pairs, later halve to keep i<j once
+                n = min(D2.shape[0], D2.shape[1])
+                if n > 0:
+                    diag = torch.arange(n, device=device)
+                    D2[diag, diag] = float('inf')
+
+            # loop radii to avoid allocating (a,b,R)
+            for r_idx in range(R):
+                c = (D2 < radii2[r_idx]).sum(dtype=torch.int64)
+                if i == j:
+                    c = c // 2
+                counts[r_idx] += c
+
+    total_pairs = (N * (N - 1)) // 2
+    if total_pairs == 0:
+        raise RuntimeError("No eligible pairs.")
+
+    C_r = counts.to(torch.float64) / float(total_pairs)
+
+    # --- fit slope on log-log ---
+    valid = C_r > 0
+    if valid.sum().item() < 2:
+        raise RuntimeError("Not enough valid correlation-sum points for a fit.")
+
+    log_r = torch.log(radii[valid].to(torch.float64))
+    log_C = torch.log(C_r[valid])
+
+    # Prefer a symmetric interior band; fall back to 20–80% in log_r
+    thr = (log_C.max() - log_C.min()) / 20.0
+    mask = (log_C > (log_C.min() + thr)) & (log_C < (log_C.max() - thr))
+    if mask.sum().item() < 5:
+        order = torch.argsort(log_r)
+        k1 = int(0.20 * order.numel())
+        k2 = int(0.80 * order.numel())
+        sel = order[k1:k2]
+        log_r_fit, log_C_fit = log_r[sel], log_C[sel]
+    else:
+        log_r_fit, log_C_fit = log_r[mask], log_C[mask]
+
+    Xmat = torch.stack([log_r_fit, torch.ones_like(log_r_fit)], dim=1)
+    beta = torch.linalg.pinv(Xmat) @ log_C_fit.unsqueeze(1)
+    return float(beta[0].item())
 
 def calculate_rank_for_variance(data_matrix, variance_threshold=0.95):
     # Perform PCA
