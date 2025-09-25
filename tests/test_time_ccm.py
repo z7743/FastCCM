@@ -2,9 +2,9 @@ import pytest
 import numpy as np
 import time
 import torch
-from FastCCM import CCM
-from FastCCM.utils import utils
-from FastCCM.data.data_loader import get_truncated_lorenz_rand
+from fastccm import PairwiseCCM
+from fastccm.utils import utils
+from fastccm.data.data_loader import get_truncated_lorenz_rand
 
 ### Helper functions
 def prepare_embeddings(N_sys):
