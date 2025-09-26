@@ -17,6 +17,166 @@ class Functions:
         """
         self.ccm = PairwiseCCM(device=device)
 
+    def _resolve_sizes_compute_(self, X_emb, Y_emb, library_size, sample_size, tp):
+        # Mirror PairwiseCCM.__ccm_core 'compute' defaults using GLOBAL min_len
+        min_len = min(min(arr.shape[0] for arr in X_emb),
+                      min(arr.shape[0] for arr in Y_emb))
+        if library_size is None:
+            L = min_len
+        elif library_size == "auto":
+            L = min(min_len // 2, 700)
+        else:
+            L = int(library_size)
+
+        if sample_size is None:
+            S = min_len
+        elif sample_size == "auto":
+            S = min(min_len // 6, 250)
+        else:
+            S = int(sample_size)
+        return L, S
+
+    def _resolve_sizes_predict_(self, X_lib_emb, Y_lib_emb, X_pred_emb, library_size, tp):
+        # Mirror PairwiseCCM.__ccm_core 'predict' defaults using GLOBAL minima
+        min_len_lib = min(min(arr.shape[0] for arr in X_lib_emb),
+                          min(arr.shape[0] for arr in Y_lib_emb))
+        if X_pred_emb is None:
+            min_len_pred = min(arr.shape[0] for arr in X_lib_emb)
+        else:
+            min_len_pred = min(arr.shape[0] for arr in X_pred_emb)
+
+        if library_size is None:
+            L = min_len_lib
+        elif library_size == "auto":
+            L = min(min_len_lib // 2, 700)
+        else:
+            L = int(library_size)
+        return L, min_len_pred
+
+    def compute_blocked(
+        self,
+        X_emb,
+        Y_emb=None,
+        *,
+        x_block=64,
+        y_block=64,
+        library_size=None,
+        sample_size=None,
+        exclusion_window=0,
+        tp=0,
+        method="simplex",
+        seed=None,
+        metric="corr",
+        **kwargs
+    ):
+        """
+        Compute CCM in (n_X x n_Y) blocks to reduce peak memory.
+
+        Returns
+        -------
+        np.ndarray  with shape (E_y_max, n_Y, n_X)
+        """
+        import numpy as np
+
+        if Y_emb is None:
+            Y_emb = X_emb
+
+        nX, nY = len(X_emb), len(Y_emb)
+        E_y_max = max(y.shape[-1] for y in Y_emb)
+
+        # Preallocate and fill with NaN (in case some Y have smaller E)
+        out = np.full((E_y_max, nY, nX), np.nan, dtype=np.float32)
+
+        # Resolve sizes globally so each block uses identical sampling defaults
+        L_res, S_res = self._resolve_sizes_compute_(X_emb, Y_emb, library_size, sample_size, tp)
+
+        for y0 in range(0, nY, y_block):
+            y1 = min(y0 + y_block, nY)
+            for x0 in range(0, nX, x_block):
+                x1 = min(x0 + x_block, nX)
+
+                r_blk = self.ccm.compute(
+                    X_emb[x0:x1],
+                    Y_emb[y0:y1],
+                    library_size=L_res,
+                    sample_size=S_res,
+                    exclusion_window=exclusion_window,
+                    tp=tp,
+                    method=method,
+                    seed=seed,
+                    metric=metric,
+                    **kwargs
+                )  # shape: (E_y_blk, y_len, x_len)
+
+                Ey_blk = r_blk.shape[0]
+                out[:Ey_blk, y0:y1, x0:x1] = r_blk
+
+        return out
+
+    def predict_blocked(
+        self,
+        X_lib_emb,
+        Y_lib_emb=None,
+        X_pred_emb=None,
+        *,
+        x_block=64,
+        y_block=64,
+        library_size=None,
+        exclusion_window=0,
+        tp=0,
+        method="simplex",
+        seed=None,
+        metric="corr",
+        **kwargs
+    ):
+        """
+        Predict in (n_X x n_Y) blocks. Forces a GLOBAL S_pred so output is a single tensor.
+
+        Returns
+        -------
+        np.ndarray with shape (S_pred_global, E_y_max, n_Y, n_X)
+        """
+        import numpy as np
+
+        if Y_lib_emb is None:
+            Y_lib_emb = X_lib_emb
+
+        nX, nY = len(X_lib_emb), len(Y_lib_emb)
+        E_y_max = max(y.shape[-1] for y in Y_lib_emb)
+
+        # Resolve global library size and a global S_pred
+        L_res, S_pred = self._resolve_sizes_predict_(X_lib_emb, Y_lib_emb, X_pred_emb, library_size, tp)
+
+        # Build a trimmed X_pred view so every block uses the same S_pred
+        if X_pred_emb is None:
+            X_pred_trimmed = [x[:S_pred] for x in X_lib_emb]
+        else:
+            X_pred_trimmed = [x[:S_pred] for x in X_pred_emb]
+
+        out = np.full((S_pred, E_y_max, nY, nX), np.nan, dtype=np.float32)
+
+        for y0 in range(0, nY, y_block):
+            y1 = min(y0 + y_block, nY)
+            for x0 in range(0, nX, x_block):
+                x1 = min(x0 + x_block, nX)
+
+                A_blk = self.ccm.predict(
+                    X_lib_emb[x0:x1],
+                    Y_lib_emb[y0:y1],
+                    X_pred_trimmed[x0:x1],
+                    library_size=L_res,
+                    exclusion_window=exclusion_window,
+                    tp=tp,
+                    method=method,
+                    seed=seed,
+                    metric=metric,
+                    **kwargs
+                )  # shape: (S_pred, E_y_blk, y_len, x_len)
+
+                Ey_blk = A_blk.shape[1]
+                out[:, :Ey_blk, y0:y1, x0:x1] = A_blk
+
+        return out
 
     def convergence_test(
             self, 

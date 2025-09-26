@@ -234,6 +234,9 @@ class PairwiseCCM:
                 nbrs_num = torch.tensor([X_lib_list[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
         elif method == "smap":
             theta = kwargs.get("theta", 1.0)
+            sample_batch_size = kwargs.get("sample_batch_size", 2048)
+            ridge = kwargs.get("ridge", 0.0)
+            theta = kwargs.get("theta", 1.0)
         else:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
@@ -301,7 +304,9 @@ class PairwiseCCM:
                 lib_indices, smpl_indices,
                 X_lib, X_sample, Y_lib_s, Y_smp_s,
                 exclusion_window, theta, metric_fn=metric_fn,
-                return_pred=(Y_smp_s is None)
+                return_pred=(Y_smp_s is None),
+                sample_batch_size=sample_batch_size,
+                ridge=ridge
             )
 
         return out
@@ -344,61 +349,82 @@ class PairwiseCCM:
         else:
             return r_AB
 
-    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, metric_fn, return_pred=False):
+    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted,
+                      exclusion_rad, theta, metric_fn, return_pred=False,
+                      sample_batch_size=None, ridge=0.0):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
-        max_E_X = X_lib.shape[2]
-        max_E_Y = Y_lib_shifted.shape[2]
+        max_E_X  = X_lib.shape[2]
+        max_E_Y  = Y_lib_shifted.shape[2]
         subsample_size = X_sample.shape[1]
-        subset_size = X_lib.shape[1]
+        subset_size    = X_lib.shape[1]
 
-        #sample_X_t = sample_X.permute(2, 0, 1)
-        #subset_X_t = subset_X.permute(2, 0, 1)
-        #subset_y_t = subset_y.permute(2, 0, 1)
-        
-        weights = self.__get_local_weights(X_lib,X_sample,lib_indices, smpl_indices, exclusion_rad, theta)
-        W = weights.unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, subset_size).reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, 1)
+        # Precompute library with intercept once 
+        X_lib_intercept = torch.cat([torch.ones((num_ts_X, subset_size, 1), device=self.device), X_lib], dim=2)
 
-        X = X_lib.unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, subset_size, max_E_X)
-        X = X.reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, max_E_X)
+        A_all = torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=self.device)
 
-        Y = Y_lib_shifted.unsqueeze(1).unsqueeze(0).expand(num_ts_X, num_ts_Y, subsample_size, subset_size, max_E_Y)
-        Y = Y.reshape(num_ts_X * num_ts_Y * subsample_size, subset_size, max_E_Y)
+        if sample_batch_size is None or sample_batch_size >= subsample_size:
+            sample_batch_size = subsample_size
 
-        X_intercept = torch.cat([torch.ones((num_ts_X * num_ts_Y * subsample_size, subset_size, 1),device=self.device), X], dim=2)
-        
-        X_intercept_weighted = X_intercept * W
-        Y_weighted = Y * W
+        for s0 in range(0, subsample_size, sample_batch_size):
+            s1 = min(subsample_size, s0 + sample_batch_size)
+            B  = s1 - s0
 
-        XTWX = torch.bmm(X_intercept_weighted.transpose(1, 2), X_intercept_weighted)
-        XTWy = torch.bmm(X_intercept_weighted.transpose(1, 2), Y_weighted)
-        beta = torch.bmm(torch.pinverse(XTWX), XTWy)
-        #beta_ = beta.reshape(dim,dim,sample_size,*beta.shape[1:])
+            # Slice the queries 
+            X_sample_b = X_sample[:, s0:s1, :]  # (num_ts_X, B, max_E_X)
 
-        X_ = X_sample.unsqueeze(1).expand(num_ts_X, num_ts_Y, subsample_size, max_E_X)
-        X_ = X_.reshape(num_ts_X * num_ts_Y * subsample_size, max_E_X)
-        X_ = torch.cat([torch.ones((num_ts_X * num_ts_Y * subsample_size, 1),device=self.device), X_], dim=1)
-        X_ = X_.reshape(num_ts_X * num_ts_Y * subsample_size, 1, max_E_X+1)
-        
-        #A = torch.einsum('abpij,bcpi->abcpj', beta, X_)
-        #A = torch.permute(A[:,0],(2,3,1,0))
+            weights = self.__get_local_weights(
+                lib=X_lib, sublib=X_sample_b,
+                subset_idx=lib_indices, sample_idx=smpl_indices[s0:s1],
+                exclusion_rad=exclusion_rad, theta=theta
+            )
 
-        A = torch.bmm(X_, beta).reshape(num_ts_X, num_ts_Y, subsample_size, max_E_Y)
-        A = torch.permute(A,(2,3,1,0))
+            W = weights.unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size) \
+                                .reshape(num_ts_X * num_ts_Y * B, subset_size, 1)
+
+            X = X_lib.unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_X) \
+                                .reshape(num_ts_X * num_ts_Y * B, subset_size, max_E_X)
+
+            Y = Y_lib_shifted.unsqueeze(1).unsqueeze(0).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_Y) \
+                                        .reshape(num_ts_X * num_ts_Y * B, subset_size, max_E_Y)
+
+            X_intercept = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, subset_size, 1), device=self.device), X], dim=2)
+
+            X_intercept_weighted = X_intercept * W
+            Y_weighted = Y * W
+
+            XTWX = torch.bmm(X_intercept_weighted.transpose(1, 2), X_intercept_weighted)
+            if ridge and ridge > 0.0:
+                I = torch.eye(max_E_X + 1, device=self.device).expand_as(XTWX)
+                XTWX = XTWX + ridge * I
+            XTWy = torch.bmm(X_intercept_weighted.transpose(1, 2), Y_weighted)
+
+            beta = torch.bmm(torch.pinverse(XTWX), XTWy) 
+
+            X_ = X_sample_b.unsqueeze(1).expand(num_ts_X, num_ts_Y, B, max_E_X) \
+                                        .reshape(num_ts_X * num_ts_Y * B, max_E_X)
+            X_ = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, 1), device=self.device), X_], dim=1) \
+                .reshape(num_ts_X * num_ts_Y * B, 1, max_E_X + 1)
+
+            A = torch.bmm(X_, beta).reshape(num_ts_X, num_ts_Y, B, max_E_Y)
+            A = torch.permute(A, (2, 3, 1, 0))  # (B, max_E_Y, num_ts_Y, num_ts_X)
+
+            A_all[s0:s1] = A  
 
         if (Y_sample_shifted is None) and return_pred:
-            return A
+            return A_all
 
-        B = torch.permute(Y_sample_shifted,(1,2,0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X)
-        #TODO: test whether B = sample_y.unsqueeze(-2).expand(sample_size, E_y, dim, dim)
-        
-        r_AB = metric_fn(A,B)
+        B_full = torch.permute(Y_sample_shifted, (1, 2, 0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X)
+        r_AB = metric_fn(A_all, B_full)
 
         if return_pred:
-            return r_AB, A
+            return r_AB, A_all
         else:
             return r_AB
-
+        
+       
+        
     def __get_random_indices(self, num_points, sample_len, generator=None):
         idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
 
