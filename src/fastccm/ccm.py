@@ -413,25 +413,6 @@ class PairwiseCCM:
 
         return X_buf
 
-
-    def __get_nbrs_indices_depricated(self, lib, sample, n_nbrs, lib_idx, sample_idx, exclusion_rad):
-        dist = torch.cdist(sample,lib)
-        # Find N + 2*excl_rad neighbors
-        indices = torch.topk(dist, n_nbrs + 2*exclusion_rad, largest=False)[1]
-        if exclusion_rad > 0:
-            # Among random sample (real) indices mask that are not within the exclusion radius
-            mask = ~((lib_idx[indices] < (sample_idx[:,None]+exclusion_rad)) & 
-                     (lib_idx[indices] > (sample_idx[:,None]-exclusion_rad)))
-            # Count the number of selected indices
-            cumsum_mask = mask.cumsum(dim=2)
-            # Select the first n_nbrs neighbors that are outside of the exclusion radius
-            selector = cumsum_mask <= n_nbrs
-            selector = selector * mask
-            
-            indices_exc = indices[selector].view(mask.shape[0],mask.shape[1],n_nbrs)
-            return indices_exc
-        else:
-            return indices
         
     def __get_nbrs_indices_with_weights(self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad):
         eps = 1e-6
@@ -482,52 +463,3 @@ class PairwiseCCM:
     
         return weights
 
-    def __get_batch_corr(self,A, B):
-        mean_A = torch.mean(A,axis=0)
-        mean_B = torch.mean(B,axis=0)
-        
-        sum_AB = torch.sum((A - mean_A[None,:,:]) * (B - mean_B[None,:,:]),axis=0)
-        sum_AA = torch.sum((A - mean_A[None,:,:]) ** 2,axis=0)
-        sum_BB = torch.sum((B - mean_B[None,:,:]) ** 2,axis=0)
-        
-        r_AB = sum_AB / torch.sqrt(sum_AA * sum_BB)
-        return r_AB
-    
-    def __get_batch_rmse(self, A, B):
-        """
-        Computes the batch-wise Root Mean Square Error (RMSE) between two 4D tensors A and B.
-        
-        Args:
-        A, B: Tensors of shape [num points, num dims, num components, num components].
-        
-        Returns:
-        Tensor of RMSE values with shape [num dims, num components, num components].
-        """
-        # Compute the squared differences between A and B
-        squared_diff = (A - B) ** 2
-        
-        # Compute the mean of the squared differences along the num points axis
-        mean_squared_diff = torch.mean(squared_diff, dim=0)
-        
-        # Compute the square root of the mean squared differences
-        rmse = torch.sqrt(mean_squared_diff)
-        
-        return rmse
-    
-    def __get_batch_mse(self, A, B):
-        """
-        Computes the batch-wise Mean Squared Error (MSE) between two 4D tensors A and B.
-        
-        Args:
-        A, B: Tensors of shape [num points, num dims, num components, num components].
-        
-        Returns:
-        Tensor of MSE values with shape [num dims, num components, num components].
-        """
-        # Compute the squared differences between A and B
-        squared_diff = (A - B) ** 2
-        
-        # Compute the mean of the squared differences along the num points axis
-        mse = torch.mean(squared_diff, dim=0)
-        
-        return mse
