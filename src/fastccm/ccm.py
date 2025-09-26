@@ -1,6 +1,7 @@
 # ccm.py
 
 import torch
+from .utils.metrics import get_metric
 
 class PairwiseCCM:
     def __init__(self,device = "cpu"):
@@ -14,163 +15,298 @@ class PairwiseCCM:
         self.device = device
 
 
-    def compute(self, X, Y=None, subset_size=None, subsample_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
+    def compute(
+            self, 
+            X_emb, 
+            Y_emb = None, 
+            library_size = None, 
+            sample_size = None, 
+            exclusion_window = 0, 
+            tp = 0, 
+            method = "simplex", 
+            seed = None, 
+            metric = "corr",
+            **kwargs
+    ):
         """
-        Main computation function for Convergent Cross Mapping (CCM).
+        Compute the pairwise CCM matrix between lists of delay-embedded time series.
 
-        Parameters:
-            X (list of np.array): List of embeddings from which to cross-map.
-            Y (list of np.array or None): List of embeddings to predict. If None, set to be the same as X.
-            subset_size (int or None): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. If None, set to max common length. If "auto", set to max common length//2.
-            subsample_size (int or None): Number of random samples of embeddings to estimate prediction quality. If None, set to max common length. If "auto", set to max common length//6.
-            exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
-            tp (int): Interval of the prediction.
-            method (str): Method to compute the prediction ("simplex", "smap").  
-            **kwargs: Additional parameters for CCM, including:
-                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
-                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
+        Parameters
+        ----------
+        X_emb : list[np.ndarray]
+            Source embeddings. Each entry is a 2D array of shape (T, E_x) where
+            T is time and E_x is the embedding dimension for that series.
+        Y_emb : list[np.ndarray] or None, optional
+            Target embeddings. Same structure as X_emb. If None, uses X_emb.
+        subset_library_sizesize : int or "auto" or None, optional
+            Size of the library (number of candidate neighbor points) drawn from each
+            series. If None, uses the maximum common length across series. If "auto",
+            uses min(max_common_len // 2, 700).
+        sample_size : int or "auto" or None, optional
+            Number of query/evaluation points where predictions are scored.
+            If None, uses the maximum common length across series. If "auto",
+            uses min(max_common_len // 6, 250).
+        exclusion_window : int or None, optional
+            Temporal exclusion radius in samples. When an int r is provided,
+            neighbors with |t_neighbor − t_query| ≤ r are excluded (self excluded when r=0).
+            When None, no temporal exclusion is applied (self can be included).
+        tp : int, optional
+            Prediction horizon (lead). Predicts Y[t + tp] from X[t]. Default: 0.
+        method : {"simplex", "smap"}, optional
+            Local regressor: k-NN weighted average ("simplex") or locally weighted
+            linear ("smap").
+        metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, optional
+            Scoring function applied to (prediction, target). If a string, one of the
+            built-ins. If a callable, it must accept (A, B) with shapes
+            [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
+            Default: "corr".
 
-        Returns:
-            np.array: A matrix of correlation coefficients between the real and predicted states.
+        Other Parameters
+        ----------------
+        nbrs_num : int, optional
+            Number of neighbors for "simplex". Default is E_x + 1 per source series.
+        theta : float, optional
+            Local weighting strength for "smap". Default: 1.0.
 
-        Raises:
-            ValueError: If an invalid method is specified or if required parameters for the chosen method are not provided.
+        Returns
+        -------
+        np.ndarray
+            Array of Pearson correlations with shape (E_y, n_Y, n_X), where E_y is
+            the target embedding dimension for each Y series, n_Y is the number of
+            target series, and n_X is the number of source series.
+
+        Raises
+        ------
+        ValueError
+            If `method` is not one of {"simplex", "smap"} or required options are invalid.
         """
-        if Y is None:
-            Y = X
+        if Y_emb is None:
+            Y_emb = X_emb
 
-        # Number of time series 
-        num_ts_X = len(X)
-        num_ts_Y = len(Y)
-        # Max embedding dimension
-        max_E_X = torch.tensor([X[i].shape[-1] for i in range(num_ts_X)], device=self.device).max().item()
-        max_E_Y = torch.tensor([Y[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
-        # Max common length
-        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)], device=self.device).min().item()
-
-
-        if method == "simplex":
-            if "nbrs_num" in kwargs:
-                nbrs_num = kwargs["nbrs_num"]
-                #if isinstance(nbrs_num, int):
-                nbrs_num = torch.tensor([nbrs_num] * num_ts_X, device=self.device)
-            else:
-                nbrs_num = torch.tensor([X[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
-        elif method == "smap":
-            theta = kwargs.get("theta", 5)  # Default theta to 5
-        else:
-            raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
-
-
-        # Handle subset_size and subsample_size
-        if subset_size is None:
-            subset_size = min_len
-        elif subset_size == "auto":
-            subset_size = min(min_len // 2, 700)
-
-        if subsample_size is None:
-            subsample_size = min_len
-        elif subsample_size == "auto":
-            subsample_size = min(min_len // 6, 250)
-
-        # Random indices for sampling
-        lib_indices = self.__get_random_indices(min_len - tp, subset_size)
-        smpl_indices = self.__get_random_indices(min_len - tp, subsample_size)
-
-        # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
-        X_lib = self.__get_random_sample(X, min_len, lib_indices, num_ts_X, max_E_X)
-        X_sample = self.__get_random_sample(X, min_len, smpl_indices, num_ts_X, max_E_X)
-        Y_lib_shifted = self.__get_random_sample(Y, min_len, lib_indices + tp, num_ts_Y, max_E_Y)
-        Y_sample_shifted = self.__get_random_sample(Y, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
-
-        if method == "simplex":
-            r_AB = self.__simplex_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num)
-        elif method == "smap":
-            r_AB = self.__smap_prediction(lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta)
-
+        r_AB = self.__ccm_core(
+            mode="compute",
+            X_lib_list=X_emb,
+            Y_lib_list=Y_emb,
+            X_sample_list=X_emb,
+            library_size=library_size,
+            sample_size=sample_size,
+            exclusion_window=exclusion_window,
+            tp=tp,
+            method=method,
+            seed=seed,
+            metric=metric,
+            **kwargs
+        )
         return r_AB.to("cpu").numpy()
 
-
-    def predict(self, X_lib, Y_lib=None, X_pred=None, subset_size=None, exclusion_rad=0, tp=0, method="simplex", **kwargs):
-        #TODO: Is there really a case where pairwise prediction is needed? Probably move to another class 
+    def predict(
+            self, 
+            X_lib_emb, 
+            Y_lib_emb = None, 
+            X_pred_emb = None, 
+            library_size = None, 
+            exclusion_window = 0, 
+            tp = 0, 
+            method = "simplex", 
+            seed = None,
+            metric = "corr",
+            **kwargs
+    ):
         """
-        Prediction function for Convergent Cross Mapping (CCM).
+        Predict target embeddings at given query points using a CCM model fit on a library.
 
-        Parameters:
-            X (list of np.array): List of embeddings from which to cross-map.
-            Y (list of np.array or None): List of embeddings to predict. If None, set to be the same as X.
-            subset_size (int or None): Number of random samples of embeddings taken to approximate the shape of the manifold well enough. If None, set to min_len.
-            exclusion_rad (int): Exclusion radius to avoid picking temporally close points from a subset.
-            tp (int): Interval of the prediction.
-            method (str): Method to compute the prediction ("simplex", "smap").  
-            **kwargs: Additional parameters for CCM, including:
-                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
-                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
+        Parameters
+        ----------
+        X_lib_emb : list[np.ndarray]
+            Source library embeddings. Each entry is (T_lib, E_x).
+        Y_lib_emb : list[np.ndarray] or None, optional
+            Target library embeddings. Same structure as X_lib_emb. If None, uses X_lib_emb.
+        X_pred_emb : list[np.ndarray] or None, optional
+            Source query embeddings at which predictions are evaluated. Each entry is
+            (T_pred, E_x). If None, uses X_lib_emb.
+        library_size : int or "auto" or None, optional
+            Number of library points drawn from each series. If None, uses the maximum
+            common library length. If "auto", uses min(max_lib_len // 2, 700).
+        exclusion_window : int or None, optional
+            Temporal exclusion radius in samples. When an int r is provided,
+            neighbors with |t_neighbor − t_query| ≤ r are excluded (self excluded when r=0).
+            When None, no temporal exclusion is applied (self can be included).
+        tp : int, optional
+            Prediction horizon (lead). Predicts Y[t + tp] from X[t]. Default: 0.
+        method : {"simplex", "smap"}, optional
+            Local regressor: "simplex" or "smap".
+        metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, optional
+            Scoring function applied to (prediction, target). If a string, one of the
+            built-ins. If a callable, it must accept (A, B) with shapes
+            [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
+            Default: "corr".
 
-        Returns:
-            np.array: Predictions for the target time series.
+        Other Parameters
+        ----------------
+        nbrs_num : int, optional
+            Number of neighbors for "simplex". Default is E_x + 1 per source series.
+        theta : float, optional
+            Local weighting strength for "smap". Default: 1.0.
 
-        Raises:
-            ValueError: If an invalid method is specified or if required parameters for the chosen method are not provided.
+        Returns
+        -------
+        np.ndarray
+            Predicted target embeddings with shape (T_pred, E_y, n_Y, n_X), where
+            T_pred is the number of query points, E_y is the target embedding
+            dimension, n_Y is number of targets, and n_X is number of sources.
+
+        Raises
+        ------
+        ValueError
+            If `method` is not one of {"simplex", "smap"} or required options are invalid.
         """
-        if Y_lib is None:
-            Y_lib = X_lib
+        if Y_lib_emb is None:
+            Y_lib_emb = X_lib_emb
+        if X_pred_emb is None:
+            X_pred_emb = X_lib_emb
 
-        if X_pred is None:
-            X_pred = X_lib
+        A = self.__ccm_core(
+            mode="predict",
+            X_lib_list=X_lib_emb,
+            Y_lib_list=Y_lib_emb,
+            X_sample_list=X_pred_emb,
+            library_size=library_size,
+            sample_size=None, 
+            exclusion_window=exclusion_window,
+            tp=tp,
+            method=method,
+            seed=seed,
+            metric=metric,
+            **kwargs
+        )
+        return A.to("cpu").numpy()
 
-        # Number of time series 
-        num_ts_X = len(X_lib)
-        num_ts_Y = len(Y_lib)
-        # Max embedding dimension
-        max_E_X = torch.tensor([X_lib[i].shape[-1] for i in range(num_ts_X)]).max().item()
-        max_E_Y = torch.tensor([Y_lib[i].shape[-1] for i in range(num_ts_Y)]).max().item()
-        # Max common length
-        min_len_lib = torch.tensor([Y_lib[i].shape[0] for i in range(num_ts_Y)] + [X_lib[i].shape[0] for i in range(num_ts_X)]).min().item()
-        min_len_pred = torch.tensor([X_pred[i].shape[0] for i in range(num_ts_X)]).min().item()
+    def __ccm_core(
+        self,
+        mode,                      # "compute" or "predict"
+        X_lib_list,                # list[np.ndarray]
+        Y_lib_list,                # list[np.ndarray]
+        X_sample_list=None,        # list[np.ndarray] | None (required for "predict")
+        library_size=None,
+        sample_size=None,
+        exclusion_window=0,
+        tp=0,
+        method="simplex",
+        seed=None,
+        metric="corr",
+        **kwargs
+    ):
+        metric_fn = get_metric(metric)
+        # ---------- 1) dims / lengths ----------
+        num_ts_X = len(X_lib_list)
+        num_ts_Y = len(Y_lib_list)
 
+        max_E_X = torch.tensor([X_lib_list[i].shape[-1] for i in range(num_ts_X)], device=self.device).max().item()
+        max_E_Y = torch.tensor([Y_lib_list[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
+
+        if mode == "compute":
+            min_len = torch.tensor(
+                [Y_lib_list[i].shape[0] for i in range(num_ts_Y)] +
+                [X_lib_list[i].shape[0] for i in range(num_ts_X)],
+                device=self.device
+            ).min().item()
+            if min_len - tp <= 0:
+                raise ValueError("Not enough points after applying tp.")
+        else:
+            if X_sample_list is None:
+                raise ValueError("X_sample_list is required in 'predict' mode.")
+            min_len_lib = torch.tensor(
+                [Y_lib_list[i].shape[0] for i in range(num_ts_Y)] +
+                [X_lib_list[i].shape[0] for i in range(num_ts_X)],
+                device=self.device
+            ).min().item()
+            min_len_pred = torch.tensor([X_sample_list[i].shape[0] for i in range(num_ts_X)], device=self.device).min().item()
+            if min_len_lib - tp <= 0 or min_len_pred <= 0:
+                raise ValueError("Not enough points for library or prediction.")
+
+        # ---------- 2) method params ----------
         if method == "simplex":
             if "nbrs_num" in kwargs:
                 nbrs_num = kwargs["nbrs_num"]
-                #if isinstance(nbrs_num, int):
-                nbrs_num = torch.tensor([nbrs_num] * num_ts_X, device=self.device)
+                nbrs_num = torch.tensor([nbrs_num] * num_ts_X, device=self.device) if isinstance(nbrs_num, int) \
+                        else torch.tensor(nbrs_num, device=self.device)
             else:
-                nbrs_num = torch.tensor([X_lib[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
+                nbrs_num = torch.tensor([X_lib_list[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
         elif method == "smap":
-            theta = kwargs.get("theta", 5)  # Default theta to 5
+            theta = kwargs.get("theta", 1.0)
         else:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
-        # Handle subset_size
-        if subset_size is None:
-            subset_size = min_len_lib
-        elif subset_size == "auto":
-            subset_size = min(min_len_lib // 2, 700)
+        # ---------- 3) size resolution ----------
+        if mode == "compute":
+            # Defaults/auto computed from min_len (not min_len - tp)
+            if library_size is None:
+                library_size_res = min_len
+            elif library_size == "auto":
+                library_size_res = min(min_len // 2, 700)
+            else:
+                library_size_res = int(library_size)
 
-        #=======================================================#
+            if sample_size is None:
+                sample_size_res = min_len
+            elif sample_size == "auto":
+                sample_size_res = min(min_len // 6, 250)
+            else:
+                sample_size_res = int(sample_size)
+        else:  # predict
+            if library_size is None:
+                library_size_res = min_len_lib
+            elif library_size == "auto":
+                library_size_res = min(min_len_lib // 2, 700)
+            else:
+                library_size_res = int(library_size)
 
-        # Random indices for sampling
-        lib_indices = self.__get_random_indices(min_len_lib - tp, subset_size)
-        smpl_indices = torch.arange(min_len_pred, device=self.device)
+        # ---------- 4) indices ----------
+        gen_lib = gen_smpl = None
+        if seed is not None:
+            base = int(seed)
+            gen_lib  = torch.Generator(device=self.device).manual_seed(base)
+            gen_smpl = torch.Generator(device=self.device).manual_seed(base + 1)
+            
+        if mode == "compute":
+            # Indices are still drawn from the valid (min_len - tp) window, like your original
+            lib_indices  = self.__get_random_indices(min_len - tp, library_size_res, gen_lib)
+            smpl_indices = self.__get_random_indices(min_len - tp, sample_size_res, gen_smpl)
+        else:
+            lib_indices  = self.__get_random_indices(min_len_lib - tp, library_size_res, gen_lib)
+            smpl_indices = torch.arange(min_len_pred, device=self.device)  # same as original
 
-        # Select X_lib and X_sample at time t and Y_lib, Y_sample at time t+tp
-        X_subset = self.__get_random_sample(X_lib, min_len_lib, lib_indices, num_ts_X, max_E_X)
-        X_sample = self.__get_random_sample(X_pred, min_len_pred, smpl_indices, num_ts_X, max_E_X)
-        Y_subset_shifted = self.__get_random_sample(Y_lib, min_len_lib, lib_indices + tp, num_ts_Y, max_E_Y)
-        #Y_sample_shifted = self.__get_random_sample(Y_pred, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
+        # ---------- 5) sampling ----------
+        if mode == "compute":
+            X_lib    = self.__get_random_sample(X_lib_list, min_len, lib_indices,  num_ts_X, max_E_X)
+            X_sample = self.__get_random_sample(X_lib_list, min_len, smpl_indices, num_ts_X, max_E_X)
+            Y_lib_s  = self.__get_random_sample(Y_lib_list, min_len, lib_indices + tp,  num_ts_Y, max_E_Y)
+            Y_smp_s  = self.__get_random_sample(Y_lib_list, min_len, smpl_indices + tp, num_ts_Y, max_E_Y)
+        else:
+            X_lib    = self.__get_random_sample(X_lib_list,   min_len_lib,  lib_indices,      num_ts_X, max_E_X)
+            X_sample = self.__get_random_sample(X_sample_list,min_len_pred, smpl_indices,     num_ts_X, max_E_X)
+            Y_lib_s  = self.__get_random_sample(Y_lib_list,   min_len_lib,  lib_indices + tp, num_ts_Y, max_E_Y)
+            Y_smp_s  = None
 
-        #TODO: smpl_indices if X_pred is not None should not intersect with lib_indices
-        
+        # ---------- 6) method call ----------
         if method == "simplex":
-            pred = self.__simplex_prediction(lib_indices, smpl_indices, X_subset, X_sample, Y_subset_shifted, None, exclusion_rad, nbrs_num, True)
-        elif method == "smap":
-            pred = self.__smap_prediction(lib_indices, smpl_indices, X_subset, X_sample, Y_subset_shifted, None, exclusion_rad, theta, True)
+            out = self.__simplex_prediction(
+                lib_indices, smpl_indices,
+                X_lib, X_sample, Y_lib_s, Y_smp_s,
+                exclusion_window, nbrs_num, metric_fn=metric_fn,
+                return_pred=(Y_smp_s is None)
+            )
+        else:
+            out = self.__smap_prediction(
+                lib_indices, smpl_indices,
+                X_lib, X_sample, Y_lib_s, Y_smp_s,
+                exclusion_window, theta, metric_fn=metric_fn,
+                return_pred=(Y_smp_s is None)
+            )
 
-        return pred.to("cpu").numpy()
+        return out
 
-
-
-    def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, return_pred=False):
+    def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, metric_fn, return_pred=False):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
@@ -201,14 +337,14 @@ class PairwiseCCM:
         B = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
         
         # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X 
-        r_AB = self.__get_batch_corr(A, B)
+        r_AB = metric_fn(A, B)
 
         if return_pred:
             return r_AB, A
         else:
             return r_AB
 
-    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, return_pred=False):
+    def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, theta, metric_fn, return_pred=False):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_X = X_lib.shape[2]
@@ -256,15 +392,15 @@ class PairwiseCCM:
         B = torch.permute(Y_sample_shifted,(1,2,0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X)
         #TODO: test whether B = sample_y.unsqueeze(-2).expand(sample_size, E_y, dim, dim)
         
-        r_AB = self.__get_batch_corr(A,B)
+        r_AB = metric_fn(A,B)
 
         if return_pred:
             return r_AB, A
         else:
             return r_AB
 
-    def __get_random_indices(self, num_points, sample_len):
-        idxs_X = torch.argsort(torch.rand(num_points,device=self.device))[0:sample_len]
+    def __get_random_indices(self, num_points, sample_len, generator=None):
+        idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
 
         return idxs_X
 
@@ -278,13 +414,14 @@ class PairwiseCCM:
         return X_buf
 
 
-    def __get_nbrs_indices(self, lib, sample, n_nbrs, lib_idx, sample_idx, exclusion_rad):
+    def __get_nbrs_indices_depricated(self, lib, sample, n_nbrs, lib_idx, sample_idx, exclusion_rad):
         dist = torch.cdist(sample,lib)
         # Find N + 2*excl_rad neighbors
         indices = torch.topk(dist, n_nbrs + 2*exclusion_rad, largest=False)[1]
         if exclusion_rad > 0:
             # Among random sample (real) indices mask that are not within the exclusion radius
-            mask = ~((lib_idx[indices] < (sample_idx[:,None]+exclusion_rad)) & (lib_idx[indices] > (sample_idx[:,None]-exclusion_rad)))
+            mask = ~((lib_idx[indices] < (sample_idx[:,None]+exclusion_rad)) & 
+                     (lib_idx[indices] > (sample_idx[:,None]-exclusion_rad)))
             # Count the number of selected indices
             cumsum_mask = mask.cumsum(dim=2)
             # Select the first n_nbrs neighbors that are outside of the exclusion radius
@@ -299,26 +436,25 @@ class PairwiseCCM:
     def __get_nbrs_indices_with_weights(self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad):
         eps = 1e-6
         dist = torch.cdist(sample, lib)
-        # Find N + 2*excl_rad neighbors
-        near_dist, indices = torch.topk(dist, 1 + n_nbrs_max + 2 * exclusion_rad, largest=False)
         
-        if exclusion_rad > 0:
-            # Mask out neighbors within the exclusion radius
-            mask = ~((lib_idx[indices] < (sample_idx[:, None] + exclusion_rad)) & 
-                    (lib_idx[indices] > (sample_idx[:, None] - exclusion_rad)))
-            
+        # Mask out neighbors within the exclusion radius
+        if exclusion_rad is None:
+            # Find N + 2*excl_rad neighbors
+            near_dist, indices = torch.topk(dist, 1 + n_nbrs_max, largest=False)
+
+            indices   = indices[:, :, :n_nbrs_max]
+            near_dist = near_dist[:, :, :n_nbrs_max]
+        else:
+            # Find N + 2*excl_rad neighbors
+            near_dist, indices = torch.topk(dist, 1 + n_nbrs_max + 2 * exclusion_rad, largest=False)
+
+            mask = ~((lib_idx[indices] <= (sample_idx[:, None] + exclusion_rad)) & 
+                    (lib_idx[indices] >= (sample_idx[:, None] - exclusion_rad)))
             # Select first n_nbrs_max neighbors outside exclusion radius
             selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
             indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
             near_dist = near_dist[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
 
-        elif exclusion_rad == 0:
-            mask = ~(lib_idx[indices] == sample_idx[:, None])
-
-            # Select first n_nbrs_max neighbors outside exclusion radius
-            selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
-            indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
-            near_dist = near_dist[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
 
         # Calculate weights
         near_dist_0 = near_dist[:, :, 0][:, :, None]
@@ -336,12 +472,14 @@ class PairwiseCCM:
         if theta == None:
             weights = torch.exp(-(dist))
         else:
-            weights = torch.exp(-(theta*dist/dist.mean(axis=2)[:,:,None]))
+            denom = dist.mean(dim=2, keepdim=True).clamp_min(1e-12)  # (n_X, S, 1)
+            weights = torch.exp(-(theta * dist / denom))
 
-        if exclusion_rad > 0:
+        #if exclusion_rad > 0:
+        if exclusion_rad is not None:
             exclusion_matrix = (torch.abs(subset_idx[None] - sample_idx[:,None]) > exclusion_rad)
             weights = weights * exclusion_matrix
-        
+    
         return weights
 
     def __get_batch_corr(self,A, B):

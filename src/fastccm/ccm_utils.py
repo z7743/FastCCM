@@ -1,7 +1,7 @@
 # ccm_utils.py
 import torch
 import numpy as np
-from fastccm.ccm import PairwiseCCM
+from fastccm import PairwiseCCM
 from fastccm.utils.utils import get_td_embedding_np
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -18,38 +18,80 @@ class Functions:
         self.ccm = PairwiseCCM(device=device)
 
 
-    def convergence_test(self, X, Y=None, subset_sizes="auto", subsample_size=None, exclusion_rad=0, tp=0, method="simplex", trials=10, **kwargs):
+    def convergence_test(
+            self, 
+            X_emb, 
+            Y_emb=None, 
+            library_sizes="auto", 
+            sample_size=None, 
+            exclusion_window=0, 
+            tp=0, 
+            method="simplex",
+            trials=10, 
+            seed=None, 
+            metric="corr",
+            **kwargs
+    ):
         """
-        Conducts a convergence test by calculating pairwise CCM for increasing subset sizes.
+        Run a CCM convergence test by sweeping the library size.
 
         Parameters:
-            X (list of np.array): List of input time series data embeddings.
-            Y (list of np.array or None, optional): List of target time series data embeddings. If None, defaults to X.
-            subset_sizes (list, np.array, or "auto"): List of subset sizes to test for convergence.
+            X_emb : list[np.ndarray]
+                List of input time series data embeddings.
+            Y_emb : list[np.ndarray] or None, optional
+                List of target time series data embeddings. If None, defaults to X.
+            library_sizes : list[int] | np.ndarray | "auto", optional
+                List of subset sizes to test for convergence.
                 If "auto", set as logarithmically spaced values between max(max common length//100, 10) and max common length.
-            subsample_size (int, None, or "auto"): Number of random samples of embeddings to estimate prediction quality. 
+            sample_size : int | "auto" | None, optional
+                Number of random samples of embeddings to estimate prediction quality. 
                 If None, set to max common length. If "auto", set to max common length//6.
-            exclusion_rad (int, optional): Exclusion radius to avoid temporally close points. Default is 0.
-            tp (int, optional): Prediction interval. Default is 0.
-            method (str, optional): Prediction method ("simplex" or "smap"). Default is "simplex".
-            trials (int, optional): Number of trials to run for each subset size. Default is 10.
+            exclusion_window : int, optional
+                Minimum temporal gap (in samples) around each query index. Neighbors with
+                |t_neighbor − t_query| ≤ exclusion_window are excluded (self-match excluded
+                when 0).
+            tp : int, optional
+                Prediction horizon. Predicts Y[t + tp] from X[t]. Default: 0.
+            method : {"simplex", "smap"}, optional
+                Local regressor: k-NN weighted average ("simplex") or locally weighted
+                linear ("smap"). Default: "simplex".
+            trials : int, optional
+                Number of independent trials per library size. Default: 10.
+            seed : int or None, optional
+                Base seed for reproducible random sampling. For trial t, the seed passed
+                to X→Y is (seed + t) and to Y→X is (seed + t + 10000). If None, sampling
+                is non-deterministic.
+            metric : {"corr","mse","rmse","neg_nrmse","dcorr"} or Callable, optional
+                Scoring function applied to (prediction, target). If a string, one of the
+                built-ins. If a callable, it must accept (A, B) with shapes
+                [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
+                Default: "corr".
             **kwargs: Additional parameters for CCM, including:
-                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
-                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
+                - nbrs_num : int or list[int]
+                    Number of neighbors for "simplex". Defaults to E + 1 internally.
+                - theta : float (for "smap") 
+                    Local weighting parameter for "smap". Defaults to 5 internally.
 
-        Returns:
-            dict: Contains results for X->Y and Y->X tests, each as a 2D array (subset size x trials).
+        Returns
+        -------
+        dict
+            {
+            "library_sizes": np.ndarray,     # same values as `library_sizes`
+            "X_to_Y": np.ndarray,            # shape: (n_sizes, trials, E_y, n_Y, n_X)
+            "Y_to_X": np.ndarray,            # shape: (n_sizes, trials, E_x, n_X, n_Y)
+            }
         """
-        if Y is None:
-            Y = X  # Default Y to X if not provided
+        if Y_emb is None:
+            Y_emb = X_emb  # Default Y to X if not provided
 
-        num_ts_X = len(X)
-        num_ts_Y = len(Y)
-        min_len = torch.tensor([Y[i].shape[0] for i in range(num_ts_Y)] + [X[i].shape[0] for i in range(num_ts_X)]).min().item()
+        num_ts_X = len(X_emb)
+        num_ts_Y = len(Y_emb)
+        min_len = torch.tensor([Y_emb[i].shape[0] for i in range(num_ts_Y)] + 
+                               [X_emb[i].shape[0] for i in range(num_ts_X)]).min().item()
 
-        # Handle subset_sizes
-        if isinstance(subset_sizes, str) and subset_sizes == "auto":
-            subset_sizes = np.unique(
+        # Handle library_sizes
+        if isinstance(library_sizes, str) and library_sizes == "auto":
+            library_sizes = np.unique(
                 np.logspace(
                     max(np.log10(min_len // 100), np.log10(10)), 
                     np.log10(min_len), 
@@ -57,32 +99,37 @@ class Functions:
                     dtype=int
                 )
             ).tolist()
-        elif not isinstance(subset_sizes, (list, np.ndarray)):
-            raise ValueError("subset_sizes must be either 'auto', a list, or a numpy array.")
+        elif not isinstance(library_sizes, (list, np.ndarray)):
+            raise ValueError("library_sizes must be either 'auto', a list, or a numpy array.")
 
             
         res_X_to_Y = []
         res_Y_to_X = []
 
         # Running convergence test for each subset size
-        for size in subset_sizes:
+        for size in library_sizes:
             res_X_to_Y_size = []
             res_Y_to_X_size = []
-            for _ in range(trials):
+
+            for t in range(trials):
+                trial_seed_xy = None if seed is None else int(seed) + t
+                trial_seed_yx = None if seed is None else int(seed) + t + 10000
                 # Calculate CCM for X -> Y
                 res_X_to_Y_size.append(self.ccm.compute(
-                    X, Y,
-                    subset_size=size, subsample_size=subsample_size,
-                    exclusion_rad=exclusion_rad, tp=tp,
-                    method=method, **kwargs
+                    X_emb, Y_emb,
+                    library_size=size, sample_size=sample_size,
+                    exclusion_window=exclusion_window, tp=tp,
+                    method=method,
+                    seed=trial_seed_xy, metric=metric, **kwargs
                 ))
 
                 # Calculate CCM for Y -> X
                 res_Y_to_X_size.append(self.ccm.compute(
-                    Y, X,
-                    subset_size=size, subsample_size=subsample_size,
-                    exclusion_rad=exclusion_rad, tp=tp,
-                    method=method, **kwargs
+                    Y_emb, X_emb,
+                    library_size=size, sample_size=sample_size,
+                    exclusion_window=exclusion_window, tp=tp,
+                    method=method,
+                    seed=trial_seed_yx, metric=metric, **kwargs
                 ))
                 
             # Store results for current subset size
@@ -91,37 +138,72 @@ class Functions:
 
         # Convert lists to numpy arrays for easier analysis and visualization
         return {
-            "subset_sizes": np.array(subset_sizes),
+            "library_sizes": np.array(library_sizes),
             "X_to_Y": np.array(res_X_to_Y),
             "Y_to_X": np.array(res_Y_to_X)
         }
 
-    def prediction_interval_test(self, x, y, subset_size="auto", subsample_size="auto", max_tp=1, exclusion_rad=0, method="simplex", **kwargs):
+    def prediction_interval_test(
+            self, 
+            x_emb, 
+            y_emb, 
+            library_size="auto", 
+            sample_size="auto", 
+            max_tp=1, 
+            exclusion_window=0, 
+            method="simplex", 
+            seed=None, 
+            metric="corr",
+            **kwargs
+    ):
         """
         Calculates CCM for different prediction intervals (tp).
 
         Parameters:
-            x (torch.Tensor): Input time series data embedding (source).
-            y (torch.Tensor): Target time series data embedding (target).
-            subset_size (int, None, or "auto"): Number of random samples of embeddings taken to approximate the manifold.
-            subsample_size (int, None, or "auto"): Number of random samples of embeddings used to estimate prediction quality.
-            exclusion_rad (int, optional): Exclusion radius to avoid selecting temporally close points from the subset. Default is 0.
-            max_tp (int, optional): Maximum prediction interval to test. Default is 1.
-            method (str, optional): Method to compute the prediction ("simplex" or "smap"). Default is "simplex".
-            **kwargs: Additional parameters for CCM, including:
-                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
-                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
+            x_emb : np.ndarray
+                Input time series data embedding (source).
+            y_emb : np.ndarray 
+                Target time series data embedding (target).
+            library_size : int | "auto" | None, optional 
+                Number of library points. If None, uses max common length; if "auto",
+                uses max_common_len // 2 (capped at 700 internally).
+            sample_size : int | "auto" | None, optional
+                Number of random samples of embeddings used to estimate prediction quality.
+            max_tp : int, optional
+                Maximum prediction interval. Evaluates tp in [0, max_tp]. Default: 1.
+            exclusion_window : int, optional
+                Theiler window (minimum temporal gap). Default: 0.
+            method : {"simplex", "smap"}, optional 
+                Local regressor to use. Default: "simplex".
+            seed : int or None, optional
+                Base seed for reproducible random sampling. For trial t, the seed passed
+                to X→Y is (seed + t) and to Y→X is (seed + t + 10000). If None, sampling
+                is non-deterministic.
+            metric : {"corr","mse","rmse","neg_nrmse","dcorr"} or Callable, optional
+                Scoring function applied to (prediction, target). If a string, one of the
+                built-ins. If a callable, it must accept (A, B) with shapes
+                [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
+                Default: "corr".
+            **kwargs :
+                Passed through to PairwiseCCM.compute. Useful keys:
+                - nbrs_num : int or list[int]
+                - theta    : float (for "smap")
 
-        Returns:
-            dict: Contains results for X->Y, with the results stored as an array for each prediction interval.
+        Returns
+        -------
+        dict
+            {
+            "tp_list": np.ndarray,           # shape: (max_tp + 1,)
+            "X_to_Y": np.ndarray,            # output of PairwiseCCM.compute for stacked targets
+            }
         """
 
-        X_ = x[:-(max_tp)][None]
-        Y_ = np.transpose(get_td_embedding_np(y,max_tp+1,1),axes=(1,0,2))
+        X_ = x_emb[:-(max_tp)][None]
+        Y_ = np.transpose(get_td_embedding_np(y_emb,max_tp+1,1),axes=(1,0,2))
         
-        res = self.ccm.compute(X_,Y_,subset_size=subset_size, subsample_size=subsample_size,
-                    exclusion_rad=exclusion_rad, tp=0,
-                    method=method, **kwargs
+        res = self.ccm.compute(X_,Y_,library_size=library_size, sample_size=sample_size,
+                    exclusion_window=exclusion_window, tp=0,
+                    method=method, seed=seed, metric=metric, **kwargs
                 )
 
 
@@ -131,36 +213,73 @@ class Functions:
             "X_to_Y": np.array(res),
         }
 
-    def find_optimal_embedding_params(self, x, y=None, subset_size="auto", subsample_size="auto", exclusion_rad=0, E_range=np.arange(1,10,1), tau_range=np.arange(1,10,1), tp_max=1,  method="simplex", trials=10, **kwargs):
+    def find_optimal_embedding_params(
+            self, 
+            x, 
+            y=None, 
+            library_size="auto", 
+            sample_size="auto", 
+            exclusion_window=0, 
+            E_range=np.arange(1,10,1), 
+            tau_range=np.arange(1,10,1), 
+            tp_max=1,  
+            method="simplex", 
+            trials=10, 
+            seed=None,
+            metric="corr",
+            **kwargs
+    ):
         """
-        Finds the optimal embedding parameters (E and tau) for CCM.
+        Grid-search (E, τ) for CCM by building delay embeddings of x for each (E, τ).
 
         Parameters:
-            x (np.array): Input time series data (1-D).
-            y (np.array or None): Target time series data (1-D). If None, defaults to x.
-            subset_size (int, None, or "auto"): Number of random samples of embeddings taken to approximate the manifold.
-                If "auto", defaults to max common length // 2. If None, defaults to the length of the shorter series.
-            subsample_size (int, None, or "auto"): Number of random samples of embeddings used to estimate prediction quality.
-                If "auto", defaults to max common length // 6. If None, defaults to the length of the shorter series.
-            exclusion_rad (int, optional): Exclusion radius to avoid selecting temporally close points from the subset. Default is 0.
-            E_range (np.array, optional): Range of embedding dimensions (E) to test. Default is np.arange(1, 10, 1).
-            tau_range (np.array, optional): Range of time delays (tau) to test. Default is np.arange(1, 10, 1).
-            tp_max (int, optional): Maximum prediction interval for delayed target embedding. Default is 1.
-            method (str, optional): Method to compute the prediction ("simplex" or "smap"). Default is "simplex".
-            trials (int, optional): Number of trials to run for each combination of parameters. Default is 10.
-            **kwargs: Additional parameters for CCM, including:
-                - nbrs_num (int): Number of neighbors for "simplex". Defaults to E + 1 internally.
-                - theta (float): Local weighting parameter for "smap". Defaults to 5 internally.
+            x : np.ndarray
+                Source scalar time series (1D).
+            y : np.ndarray or None, optional
+                Target scalar time series (1D). If None, uses x.
+            library_size : int | "auto" | None, optional
+                Number of library points for CCM. See PairwiseCCM for defaults.
+            sample_size : int | "auto" | None, optional
+                Number of query points for scoring. See PairwiseCCM for defaults.
+            exclusion_window : int, optional
+                Theiler window (minimum temporal gap). Default: 0.
+            E_range : array-like of int, optional
+                Embedding dimensions to test. Default: np.arange(1, 10).
+            tau_range : array-like of int, optional
+                Time delays to test. Default: np.arange(1, 10).
+            tp_max : int, optional
+                Maximum prediction interval used to form Y targets. Targets correspond
+                to tp=1..tp_max (tp=0 is not included here). Default: 1.
+            method : {"simplex", "smap"}, optional
+                Local regressor. Default: "simplex".
+            trials : int, optional
+                Number of repeated runs per (E, τ) to average results. Default: 10.
+            seed : int or None, optional
+                Base seed for reproducible random sampling. For trial t, the seed passed
+                to X→Y is (seed + t) and to Y→X is (seed + t + 10000). If None, sampling
+                is non-deterministic.
+            metric : {"corr","mse","rmse","neg_nrmse","dcorr"} or Callable, optional
+                Scoring function applied to (prediction, target). If a string, one of the
+                built-ins. If a callable, it must accept (A, B) with shapes
+                [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
+                Default: "corr".
+            **kwargs :
+                Passed through to PairwiseCCM.compute. Useful keys:
+                - nbrs_num : int or list[int]
+                - theta    : float (for "smap")
 
-        Returns:
-            dict: Contains the following keys:
-                - "E_range": The tested range of embedding dimensions (E).
-                - "tau_range": The tested range of time delays (tau).
-                - "tp_range": Array of tested prediction intervals.
-                - "result": Array of CCM values for all tested combinations of E, tau, and tp.
-                - "optimal_tau": The optimal tau value corresponding to the highest CCM value.
-                - "optimal_E": The optimal E value corresponding to the highest CCM value.
-                - "values": Array of CCM values for the optimal E and tau across all tp.
+        Returns
+        -------
+        dict
+            {
+            "E_range": array-like,                         # as provided
+            "tau_range": array-like,                       # as provided
+            "tp_range": np.ndarray,                        # np.arange(1, tp_max)
+            "result": np.ndarray,                          # shape: (tp_max, len(tau_range), len(E_range))
+            "optimal_tau": int,                            # tau with highest mean over tp
+            "optimal_E": int,                              # E with highest mean over tp
+            "values": np.ndarray,                          # result[:, tau*, E*], shape: (tp_max,)
+            }
         """
         if y is None:
             y = x  # Default Y to X if not provided
@@ -170,17 +289,19 @@ class Functions:
         Y_emb = [y[:(y.shape[0]+i), None] for i in np.arange(-(tp_max)+1,1)]
         
         res = np.mean([self.ccm.compute(X_emb,Y_emb,
-                               subset_size=subset_size,
-                               subsample_size=subsample_size,
-                               exclusion_rad=exclusion_rad,
+                               library_size=library_size,
+                               sample_size=sample_size,
+                               exclusion_window=exclusion_window,
                                tp=0,
-                               subtract_corr=False,
                                method=method,
+                               seed=None if seed is None else int(seed) + exp,
+                               metric=metric,
                                **kwargs)[0].reshape(tp_max,tau_range.shape[0],E_range.shape[0],) for exp in range(trials)],axis=0)
         
 
         # Find optimal tau and E for this set
-        max_idx = np.unravel_index(np.argmax(res.mean(axis=0)), res.mean(axis=0).shape)
+        mean_over_tp = res.mean(axis=0)
+        max_idx = np.unravel_index(np.argmax(mean_over_tp), mean_over_tp.shape)
 
         # Return results as a dictionary
         return {
@@ -212,7 +333,7 @@ class Visualizer:
             xscale (str): Scale of the X-axis, either "log" or "linear".
             plot_means_only (bool): If True, plots only the mean lines without individual dimension plots.
         """
-        subset_sizes = conv_test_res["subset_sizes"]
+        subset_sizes = conv_test_res["library_sizes"]
         X_to_Y_results = conv_test_res["X_to_Y"][:, :, :, Y_idx, X_idx]
         Y_to_X_results = conv_test_res["Y_to_X"][:, :, :, X_idx, Y_idx]
 
@@ -252,7 +373,7 @@ class Visualizer:
         
         ax.set_xscale(xscale)  # Set the X-axis scale to "log" or "linear"
         ax.set_xlabel("Library Size")
-        ax.set_ylabel("Pearson Correlation Coefficient")
+        ax.set_ylabel("Metric Value")
         ax.set_title("Convergence Test Visualization" if not plot_means_only else "Convergence Test: Mean Only")
         ax.grid(True)
         ax.legend()
@@ -311,7 +432,7 @@ class Visualizer:
         # Plot properties
         plt.legend()
         plt.xlabel("Prediction Interval")
-        plt.ylabel("Pearson Correlation Coefficient")
+        plt.ylabel("Metric Value")
         plt.title("Prediction Interval Test")
         plt.grid(True)
         plt.show()

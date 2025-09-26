@@ -21,17 +21,16 @@ To clone the repository and install the necessary dependencies, follow these ste
     pip install .
     ```
 
-## Usage Examples
+## Quickstart
 
 This example demonstrates how to use the FastCCM package for performing Convergent Cross Mapping (CCM).
 
 1. Import Required Libraries
 
 ```python
-from FastCCM import CCM, CCM_utils
-from FastCCM.data.data_loader import get_truncated_rossler_lorenz_rand
+from fastccm import PairwiseCCM, utils
+from fastccm.data import get_truncated_rossler_lorenz_rand
 import numpy as np
-import matplotlib.pyplot as plt
 ```
 
 2. Initialize the CCM Object
@@ -39,7 +38,7 @@ import matplotlib.pyplot as plt
 Specify the device to use (e.g., "cpu" or "cuda"):
 
 ```python
-ccm = CCM.PairwiseCCM(device="cpu")
+ccm = PairwiseCCM(device="cpu")
 ```
 
 3. Generate Data
@@ -49,7 +48,7 @@ ccm = CCM.PairwiseCCM(device="cpu")
 X = get_truncated_rossler_lorenz_rand(2000, 200000, alpha=6, C=2)
 
 Rossler_emb = X[:, :3][None]  # Shape: (number of embeddings, number of points, number of dimensions)
-Lorenz_emb = X[:, 3:][None]
+Lorenz_emb  = X[:, 3:][None]
 
 ```
 ![alt text](docs/img/rossler_lorenz.png)
@@ -60,19 +59,21 @@ Lorenz_emb = X[:, 3:][None]
 # Rossler cross-mapping Lorenz
 result_rossler_xmap_lorenz = ccm.compute(
     X=Rossler_emb, Y=Lorenz_emb, 
-    subset_size=5000, 
-    subsample_size=500, 
-    exclusion_rad=50, 
-    tp=0, method="simplex", nbrs_num=10
+    library_size=5000, 
+    sample_size=500, 
+    exclusion_window=50, 
+    tp=0, 
+    method="simplex"
 )
 
 # Lorenz cross-mapping Rossler
 result_lorenz_xmap_rossler = ccm.compute(
     X=Lorenz_emb, Y=Rossler_emb, 
-    subset_size=5000, 
-    subsample_size=500, 
-    exclusion_rad=50, 
-    tp=0, method="simplex", nbrs_num=10
+    library_size=5000, 
+    sample_size=500, 
+    exclusion_window=50, 
+    tp=0, 
+    method="simplex"
 )
 
 print("Rossler xmap Lorenz:", result_rossler_xmap_lorenz)
@@ -83,18 +84,23 @@ print("Lorenz xmap Rossler:", result_lorenz_xmap_rossler)
 ### Test convergence
 
 ```python
-conv_test_res = CCM_utils.Functions("cpu").convergence_test(
+from fastccm import ccm_utils
+
+conv_test_res = ccm_utils.Functions("cpu").convergence_test(
     X=Rossler_emb, Y=Lorenz_emb,
-    subset_sizes=[80, 160, 320, 640, 1250, 2500, 5000, 10000, 20000],
-    subsample_size=1000, exclusion_rad=20, tp=0, method="simplex", trials=20, nbrs_num=10
+    library_sizes=[80, 160, 320, 640, 1250, 2500, 5000, 10000, 20000],
+    sample_size=1000, 
+    exclusion_window=20, 
+    tp=0, 
+    method="simplex", 
+    trials=20
 )
 ```
 
 Plot the convergence test results:
 ```python
-CCM_utils.Visualizer().plot_convergence_test(conv_test_res)
+ccm_utils.Visualizer().plot_convergence_test(conv_test_res)
 ```
-
 
 ![alt text](docs/img/conv_test.png)
 
@@ -102,17 +108,20 @@ CCM_utils.Visualizer().plot_convergence_test(conv_test_res)
 ```python
 x = X[:,3]
 
-optimal_E_tau_res = CCM_utils.Functions("cpu").find_optimal_embedding_params(x, x, 2000, 500, 10,
-                                                         E_range=np.arange(2,30),
-                                                         tau_range=np.arange(1,30),
-                                                         tp_max=50,
-                                                         method="simplex",nbrs_num = 5)
+optimal_E_tau_res = ccm_utils.Functions("cpu").find_optimal_embedding_params(
+    x, x, 
+    library_size=2000, 
+    sample_size=500, 
+    exclusion_window=10,
+    E_range=np.arange(2,30),
+    tau_range=np.arange(1,30),
+    tp_max=50,
+    method="simplex")
 ```
 
 Plot the results
 ```python
-CCM_utils.Visualizer().visualize_optimal_e_tau(optimal_E_tau_res)
+ccm_utils.Visualizer().visualize_optimal_e_tau(optimal_E_tau_res)
 ```
-
 
 ![alt text](docs/img/e_tau_test.png)
