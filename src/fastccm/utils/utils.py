@@ -3,6 +3,24 @@ import torch
 import numpy as np
 from sklearn.decomposition import PCA
 
+def embed(ts, E, tau):
+    """
+    Embed a time series into a delay embedding space.
+    (n_samples, n_variables) -> (n_variables, n_samples, E)
+    Args:
+        ts (numpy.ndarray): The input time series data. Shape: (n_samples, n_variables)
+        E (int): The embedding dimension.
+        tau (int): The time delay.
+
+    Returns:
+        numpy.ndarray: The embedded time series with dimensions rearranged
+                       to shape (n_variables, n_samples, E), where n_variables
+                       is the number of variables in the original time series,
+                       n_samples is the number of embedded points, and E is
+                       the embedding dimension.
+
+    """
+    return get_td_embedding_np( ts, E, tau).transpose((2,0,1))
 
 def get_td_embeddings(ts, opt_E, opt_tau):
     ts_num = len(ts)
