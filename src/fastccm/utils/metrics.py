@@ -57,10 +57,8 @@ def batch_neg_nrmse(A: torch.Tensor, B: torch.Tensor,
     varB = (B - muB).pow(2).mean(dim=(0, 1))            # [Y, X]
     rmse_base = torch.sqrt(varB + eps)                  # [Y, X]
 
-    scale = max(T, eps)
-    score_yx = torch.exp(- (rmse / (rmse_base + eps)).pow(2) / scale)  # [Y, X]
-    # keep API: broadcast along D
-    return score_yx.unsqueeze(0).expand(A.shape[1], -1, -1).to(dtype=A.dtype)
+    neg_nrmse = torch.exp(- ((1.0 / T) * torch.pow(rmse / (rmse_base + eps), 2)))  # [Y, X]
+    return neg_nrmse.unsqueeze(0).to(dtype=A.dtype)        # [1, Y, X]
 
 def batch_dcor(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
