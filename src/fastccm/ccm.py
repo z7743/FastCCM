@@ -1,7 +1,11 @@
 # ccm.py
-
+import warnings
+import os
 import torch
 from .utils.metrics import get_metric
+
+#torch.set_num_threads(os.cpu_count())  
+#torch.set_num_interop_threads(1)
 
 class PairwiseCCM:
     def __init__(self,device = "cpu"):
@@ -14,8 +18,15 @@ class PairwiseCCM:
         """
         self.device = device
 
+    def compute(self, *args, **kwargs):
+        warnings.warn("PairwiseCCM.compute → PairwiseCCM.score_matrix", DeprecationWarning)
+        return self.score_matrix(*args, **kwargs)
+    
+    def predict(self, *args, **kwargs):
+        warnings.warn("PairwiseCCM.predict → PairwiseCCM.predict_matrix", DeprecationWarning)
+        return self.predict_matrix(*args, **kwargs)
 
-    def compute(
+    def score_matrix(
             self, 
             X_emb, 
             Y_emb = None, 
@@ -84,7 +95,7 @@ class PairwiseCCM:
             Y_emb = X_emb
 
         r_AB = self.__ccm_core(
-            mode="compute",
+            mode="score",
             X_lib_list=X_emb,
             Y_lib_list=Y_emb,
             X_sample_list=X_emb,
@@ -99,7 +110,7 @@ class PairwiseCCM:
         )
         return r_AB.to("cpu").numpy()
 
-    def predict(
+    def predict_matrix(
             self, 
             X_lib_emb, 
             Y_lib_emb = None, 
@@ -181,9 +192,10 @@ class PairwiseCCM:
         )
         return A.to("cpu").numpy()
 
+    @torch.inference_mode()
     def __ccm_core(
         self,
-        mode,                      # "compute" or "predict"
+        mode,                      # "score" or "predict"
         X_lib_list,                # list[np.ndarray]
         Y_lib_list,                # list[np.ndarray]
         X_sample_list=None,        # list[np.ndarray] | None (required for "predict")
@@ -204,7 +216,7 @@ class PairwiseCCM:
         max_E_X = torch.tensor([X_lib_list[i].shape[-1] for i in range(num_ts_X)], device=self.device).max().item()
         max_E_Y = torch.tensor([Y_lib_list[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
 
-        if mode == "compute":
+        if mode == "score":
             min_len = torch.tensor(
                 [Y_lib_list[i].shape[0] for i in range(num_ts_Y)] +
                 [X_lib_list[i].shape[0] for i in range(num_ts_X)],
@@ -241,7 +253,7 @@ class PairwiseCCM:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
         # ---------- 3) size resolution ----------
-        if mode == "compute":
+        if mode == "score":
             # Defaults/auto computed from min_len (not min_len - tp)
             if library_size is None:
                 library_size_res = min_len
@@ -271,7 +283,7 @@ class PairwiseCCM:
             gen_lib  = torch.Generator(device=self.device).manual_seed(base)
             gen_smpl = torch.Generator(device=self.device).manual_seed(base + 1)
             
-        if mode == "compute":
+        if mode == "score":
             # Indices are still drawn from the valid (min_len - tp) window, like your original
             lib_indices  = self.__get_random_indices(min_len - tp, library_size_res, gen_lib)
             smpl_indices = self.__get_random_indices(min_len - tp, sample_size_res, gen_smpl)
@@ -280,7 +292,7 @@ class PairwiseCCM:
             smpl_indices = torch.arange(min_len_pred, device=self.device)  # same as original
 
         # ---------- 5) sampling ----------
-        if mode == "compute":
+        if mode == "score":
             X_lib    = self.__get_random_sample(X_lib_list, min_len, lib_indices,  num_ts_X, max_E_X)
             X_sample = self.__get_random_sample(X_lib_list, min_len, smpl_indices, num_ts_X, max_E_X)
             Y_lib_s  = self.__get_random_sample(Y_lib_list, min_len, lib_indices + tp,  num_ts_Y, max_E_Y)
@@ -311,6 +323,7 @@ class PairwiseCCM:
 
         return out
 
+    @torch.inference_mode()
     def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, metric_fn, return_pred=False):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
@@ -349,6 +362,7 @@ class PairwiseCCM:
         else:
             return r_AB
 
+    @torch.inference_mode()
     def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted,
                       exclusion_rad, theta, metric_fn, return_pred=False,
                       sample_batch_size=None, ridge=0.0):
@@ -424,7 +438,7 @@ class PairwiseCCM:
             return r_AB
         
        
-        
+
     def __get_random_indices(self, num_points, sample_len, generator=None):
         idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
 
@@ -442,7 +456,7 @@ class PairwiseCCM:
         
     def __get_nbrs_indices_with_weights(self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad):
         eps = 1e-6
-        dist = torch.cdist(sample, lib)
+        dist = torch.cdist(sample, lib,p=2, compute_mode="use_mm_for_euclid_dist")
         
         # Mask out neighbors within the exclusion radius
         if exclusion_rad is None:
@@ -475,7 +489,7 @@ class PairwiseCCM:
 
 
     def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, theta):
-        dist = torch.cdist(sublib,lib)
+        dist = torch.cdist(sublib,lib,p=2, compute_mode="use_mm_for_euclid_dist")
         if theta == None:
             weights = torch.exp(-(dist))
         else:

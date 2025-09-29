@@ -1,5 +1,6 @@
 # src/fastccm/utils/__init__.py
 from .utils import (
+    embed,
     get_td_embedding_np,
     get_td_embeddings,
     get_td_embedding_torch,
@@ -8,6 +9,7 @@ from .utils import (
     calculate_rank_for_variance,
 )
 __all__ = (
+    "embed",
     "get_td_embedding_np",
     "get_td_embeddings",
     "get_td_embedding_torch",

@@ -1,4 +1,5 @@
 # ccm_utils.py
+import warnings
 import torch
 import numpy as np
 from fastccm import PairwiseCCM
@@ -53,7 +54,15 @@ class Functions:
             L = int(library_size)
         return L, min_len_pred
 
-    def compute_blocked(
+    def compute_blocked(self, *args, **kwargs):
+        warnings.warn("Functions.compute_blocked → Functions.score_matrix_blocked", DeprecationWarning)
+        return self.score_matrix_blocked(*args, **kwargs)
+
+    def predict_blocked(self, *args, **kwargs):
+        warnings.warn("Functions.predict_blocked → Functions.predict_matrix_blocked", DeprecationWarning)
+        return self.predict_matrix_blocked(*args, **kwargs)
+
+    def score_matrix_blocked(
         self,
         X_emb,
         Y_emb=None,
@@ -95,7 +104,7 @@ class Functions:
             for x0 in range(0, nX, x_block):
                 x1 = min(x0 + x_block, nX)
 
-                r_blk = self.ccm.compute(
+                r_blk = self.ccm.score_matrix(
                     X_emb[x0:x1],
                     Y_emb[y0:y1],
                     library_size=L_res,
@@ -113,7 +122,7 @@ class Functions:
 
         return out
 
-    def predict_blocked(
+    def predict_matrix_blocked(
         self,
         X_lib_emb,
         Y_lib_emb=None,
@@ -160,7 +169,7 @@ class Functions:
             for x0 in range(0, nX, x_block):
                 x1 = min(x0 + x_block, nX)
 
-                A_blk = self.ccm.predict(
+                A_blk = self.ccm.predict_matrix(
                     X_lib_emb[x0:x1],
                     Y_lib_emb[y0:y1],
                     X_pred_trimmed[x0:x1],
@@ -275,7 +284,7 @@ class Functions:
                 trial_seed_xy = None if seed is None else int(seed) + t
                 trial_seed_yx = None if seed is None else int(seed) + t + 10000
                 # Calculate CCM for X -> Y
-                res_X_to_Y_size.append(self.ccm.compute(
+                res_X_to_Y_size.append(self.ccm.score_matrix(
                     X_emb, Y_emb,
                     library_size=size, sample_size=sample_size,
                     exclusion_window=exclusion_window, tp=tp,
@@ -284,7 +293,7 @@ class Functions:
                 ))
 
                 # Calculate CCM for Y -> X
-                res_Y_to_X_size.append(self.ccm.compute(
+                res_Y_to_X_size.append(self.ccm.score_matrix(
                     Y_emb, X_emb,
                     library_size=size, sample_size=sample_size,
                     exclusion_window=exclusion_window, tp=tp,
@@ -345,7 +354,7 @@ class Functions:
                 [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
                 Default: "corr".
             **kwargs :
-                Passed through to PairwiseCCM.compute. Useful keys:
+                Passed through to PairwiseCCM.score_matrix. Useful keys:
                 - nbrs_num : int or list[int]
                 - theta    : float (for "smap")
 
@@ -354,14 +363,14 @@ class Functions:
         dict
             {
             "tp_list": np.ndarray,           # shape: (max_tp + 1,)
-            "X_to_Y": np.ndarray,            # output of PairwiseCCM.compute for stacked targets
+            "X_to_Y": np.ndarray,            # output of PairwiseCCM.score_matrix for stacked targets
             }
         """
 
         X_ = x_emb[:-(max_tp)][None]
         Y_ = np.transpose(get_td_embedding_np(y_emb,max_tp+1,1),axes=(1,0,2))
         
-        res = self.ccm.compute(X_,Y_,library_size=library_size, sample_size=sample_size,
+        res = self.ccm.score_matrix(X_,Y_,library_size=library_size, sample_size=sample_size,
                     exclusion_window=exclusion_window, tp=0,
                     method=method, seed=seed, metric=metric, **kwargs
                 )
@@ -424,7 +433,7 @@ class Functions:
                 [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
                 Default: "corr".
             **kwargs :
-                Passed through to PairwiseCCM.compute. Useful keys:
+                Passed through to PairwiseCCM.score_matrix. Useful keys:
                 - nbrs_num : int or list[int]
                 - theta    : float (for "smap")
 
@@ -448,7 +457,7 @@ class Functions:
         X_emb = np.concatenate([np.array([get_td_embedding_np(x[:-tp_max,None],e,tau)[:,:,0] for e in E_range],dtype=object) for tau in tau_range])
         Y_emb = [y[:(y.shape[0]+i), None] for i in np.arange(-(tp_max)+1,1)]
         
-        res = np.mean([self.ccm.compute(X_emb,Y_emb,
+        res = np.mean([self.ccm.score_matrix(X_emb,Y_emb,
                                library_size=library_size,
                                sample_size=sample_size,
                                exclusion_window=exclusion_window,
