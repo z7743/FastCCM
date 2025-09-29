@@ -57,7 +57,7 @@ Lorenz_emb  = X[:, 3:][None]
 
 ```python
 # Rossler cross-mapping Lorenz
-result_rossler_xmap_lorenz = ccm.compute(
+result_rossler_xmap_lorenz = ccm.score_matrix(
     X=Rossler_emb, Y=Lorenz_emb, 
     library_size=5000, 
     sample_size=500, 
@@ -67,7 +67,7 @@ result_rossler_xmap_lorenz = ccm.compute(
 )
 
 # Lorenz cross-mapping Rossler
-result_lorenz_xmap_rossler = ccm.compute(
+result_lorenz_xmap_rossler = ccm.score_matrix(
     X=Lorenz_emb, Y=Rossler_emb, 
     library_size=5000, 
     sample_size=500, 
