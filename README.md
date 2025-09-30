@@ -45,10 +45,13 @@ ccm = PairwiseCCM(device="cpu")
 
 ```python
 # Generate a joint Rossler-Lorenz data
-X = get_truncated_rossler_lorenz_rand(2000, 200000, alpha=6, C=2)
+X = get_truncated_rossler_lorenz_rand(400, 20000, alpha=6, C=2, seed=0)
 
-Rossler_emb = X[:, :3][None]  # Shape: (number of embeddings, number of points, number of dimensions)
-Lorenz_emb  = X[:, 3:][None]
+Rossler_emb = utils.embed(X[:, 0], E = 7, tau = 4)   # see find_optimal_embedding_params
+Lorenz_emb  = utils.embed(X[:, 3], E = 8, tau = 9)
+
+print(f"Rossler embedding shape: {Rossler_emb.shape}")
+print(f"Lorenz embedding shape: {Lorenz_emb.shape}")
 
 ```
 ![alt text](docs/img/rossler_lorenz.png)
@@ -58,26 +61,30 @@ Lorenz_emb  = X[:, 3:][None]
 ```python
 # Rossler cross-mapping Lorenz
 result_rossler_xmap_lorenz = ccm.score_matrix(
-    X=Rossler_emb, Y=Lorenz_emb, 
-    library_size=5000, 
-    sample_size=500, 
+    X_emb=Rossler_emb, 
+    Y_emb=Lorenz_emb, 
+    library_size=None,  # use maximum points
+    sample_size=300,    # use 300 random points to estimate the score
     exclusion_window=50, 
     tp=0, 
-    method="simplex"
+    method="simplex",
+    seed=0
 )
 
 # Lorenz cross-mapping Rossler
 result_lorenz_xmap_rossler = ccm.score_matrix(
-    X=Lorenz_emb, Y=Rossler_emb, 
-    library_size=5000, 
-    sample_size=500, 
+    X_emb=Lorenz_emb, 
+    Y_emb=Rossler_emb, 
+    library_size=None, 
+    sample_size=300, 
     exclusion_window=50, 
     tp=0, 
-    method="simplex"
+    method="simplex",
+    seed=0
 )
 
-print("Rossler xmap Lorenz:", result_rossler_xmap_lorenz)
-print("Lorenz xmap Rossler:", result_lorenz_xmap_rossler)
+print(f"Rossler xmap Lorenz. Shape: {result_rossler_xmap_lorenz.shape}, score: {result_rossler_xmap_lorenz[-1,0,0]:.3f}")
+print(f"Lorenz xmap Rossler. Shape: {result_lorenz_xmap_rossler.shape}, score: {result_lorenz_xmap_rossler[-1,0,0]:.3f}")
 
 ```
 
@@ -87,13 +94,15 @@ print("Lorenz xmap Rossler:", result_lorenz_xmap_rossler)
 from fastccm import ccm_utils
 
 conv_test_res = ccm_utils.Functions("cpu").convergence_test(
-    X=Rossler_emb, Y=Lorenz_emb,
-    library_sizes=[80, 160, 320, 640, 1250, 2500, 5000, 10000, 20000],
+    X_emb=Rossler_emb, 
+    Y_emb=Lorenz_emb,
+    library_sizes=[160, 320, 640, 1250, 2500, 5000, 10000, 20000],
     sample_size=1000, 
-    exclusion_window=20, 
+    exclusion_window=50, 
     tp=0, 
     method="simplex", 
-    trials=20
+    trials=20,
+    seed=0
 )
 ```
 
@@ -106,17 +115,20 @@ ccm_utils.Visualizer().plot_convergence_test(conv_test_res)
 
 ### Find optimal time-delay embedding parameters
 ```python
-x = X[:,3]
 
 optimal_E_tau_res = ccm_utils.Functions("cpu").find_optimal_embedding_params(
-    x, x, 
-    library_size=2000, 
-    sample_size=500, 
-    exclusion_window=10,
+    X[:,3], 
+    library_size=4000, 
+    sample_size=300, 
+    exclusion_window=50,
     E_range=np.arange(2,30),
     tau_range=np.arange(1,30),
     tp_max=50,
-    method="simplex")
+    method="simplex",
+    seed=0
+)
+
+print(f"Optimal E: {optimal_E_tau_res['optimal_E']}, optimal_tau: {optimal_E_tau_res['optimal_tau']}")
 ```
 
 Plot the results
