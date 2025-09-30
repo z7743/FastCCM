@@ -49,7 +49,7 @@ class PairwiseCCM:
             T is time and E_x is the embedding dimension for that series.
         Y_emb : list[np.ndarray] or None, optional
             Target embeddings. Same structure as X_emb. If None, uses X_emb.
-        subset_library_sizesize : int or "auto" or None, optional
+        library_size : int or "auto" or None, optional
             Size of the library (number of candidate neighbor points) drawn from each
             series. If None, uses the maximum common length across series. If "auto",
             uses min(max_common_len // 2, 700).

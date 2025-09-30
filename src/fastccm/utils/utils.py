@@ -7,20 +7,36 @@ def embed(ts, E, tau):
     """
     Embed a time series into a delay embedding space.
     (n_samples, n_variables) -> (n_variables, n_samples, E)
+    (n_samples, ) -> (1, n_samples, E)
+
     Args:
-        ts (numpy.ndarray): The input time series data. Shape: (n_samples, n_variables)
-        E (int): The embedding dimension.
-        tau (int): The time delay.
+        ts (list or np.ndarray): Shape (n_samples,) or (n_samples, n_variables).
+        E (int): Embedding dimension.
+        tau (int): Time delay (stride).
 
     Returns:
-        numpy.ndarray: The embedded time series with dimensions rearranged
-                       to shape (n_variables, n_samples, E), where n_variables
-                       is the number of variables in the original time series,
-                       n_samples is the number of embedded points, and E is
-                       the embedding dimension.
-
+        np.ndarray: Shape (n_variables, n_embedded_samples, E).
     """
-    return get_td_embedding_np( ts, E, tau).transpose((2,0,1))
+    if not isinstance(ts, (list, np.ndarray)):
+        raise TypeError("ts must be a list or numpy.ndarray with shape (n_samples,) or (n_samples, n_variables).")
+
+    x = np.asarray(ts)
+
+    # Normalize to 2D: (n_samples, n_variables)
+    if x.ndim == 1:
+        x = x[:, None]
+    elif x.ndim != 2:
+        raise ValueError("ts must have shape (n_samples,) or (n_samples, n_variables).")
+
+    # Basic argument checks
+    if not (isinstance(E, (int, np.integer)) and E >= 1):
+        raise ValueError("E must be an integer >= 1.")
+    if not (isinstance(tau, (int, np.integer)) and tau >= 1):
+        raise ValueError("tau must be an integer >= 1.")
+
+    td = get_td_embedding_np(x, E, tau)
+
+    return td.transpose((2, 0, 1))
 
 def get_td_embeddings(ts, opt_E, opt_tau):
     ts_num = len(ts)

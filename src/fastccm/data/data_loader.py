@@ -34,20 +34,28 @@ def rossler_lorenz(t, state, alpha, C):
     return [dx1dt, dx2dt, dx3dt, dy1dt, dy2dt, dy3dt]
 
 
-def get_truncated_lorenz_rand(tmax = 140, n_steps = 10000, sigma=10, beta=8/3, rho=28):
+def get_truncated_lorenz_rand(tmax = 140, n_steps = 10000, sigma=10, beta=8/3, rho=28, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
     initial_state = np.random.normal(size=(3))
 
     trunc = int(n_steps/tmax * 40) # Number of steps to get independence from initial conditions
     t_eval = np.linspace(0, tmax, trunc + n_steps)
 
     solution = solve_ivp(lorenz, (0, tmax), initial_state, args=(sigma, beta, rho), t_eval=t_eval).y.T[trunc:]
+
+    np.random.seed()
     return solution
 
-def get_truncated_rossler_lorenz_rand(tmax = 140, n_steps = 10000, alpha = 6, C = 8):
+def get_truncated_rossler_lorenz_rand(tmax = 140, n_steps = 10000, alpha = 6, C = 8, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
     initial_state = np.random.normal(size=(6))
 
     trunc = int(n_steps/tmax * 40) # Number of steps to get independence from initial conditions
     t_eval = np.linspace(0, tmax, trunc + n_steps)
 
     solution = solve_ivp(rossler_lorenz, (0, tmax), initial_state, args=(alpha, C), t_eval=t_eval).y.T[trunc:]
+    
+    np.random.seed()
     return solution
