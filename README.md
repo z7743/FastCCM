@@ -21,7 +21,7 @@ To clone the repository and install the necessary dependencies, follow these ste
     pip install .
     ```
 
-## Quickstart
+## Quick start
 
 This example demonstrates how to use the FastCCM package for performing Convergent Cross Mapping (CCM).
 
