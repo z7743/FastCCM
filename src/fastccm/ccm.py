@@ -151,7 +151,10 @@ class PairwiseCCM:
             metric=metric,
             **kwargs
         )
-        return r_AB.to("cpu").numpy()
+
+        r_AB = r_AB.to("cpu").numpy()
+        self._soft_clear()
+        return r_AB
 
     def predict_matrix(
             self, 
@@ -233,7 +236,10 @@ class PairwiseCCM:
             metric=metric,
             **kwargs
         )
-        return A.to("cpu").numpy()
+
+        A = A.to("cpu").numpy()
+        self._soft_clear()
+        return A
 
     @torch.inference_mode()
     def __ccm_core(
@@ -367,7 +373,9 @@ class PairwiseCCM:
         return out
 
     @torch.inference_mode()
-    def __simplex_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, exclusion_rad, nbrs_num, metric_fn, return_pred=False, knn_block=None):
+    def __simplex_prediction(self, lib_indices, smpl_indices,
+                              X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, 
+                              exclusion_rad, nbrs_num, metric_fn, return_pred=False, knn_block=None):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
