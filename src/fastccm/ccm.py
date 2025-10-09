@@ -7,16 +7,49 @@ from .utils.metrics import get_metric
 #torch.set_num_threads(os.cpu_count())  
 #torch.set_num_interop_threads(1)
 
+def _resolve_dtype(x):
+    if isinstance(x, torch.dtype):
+        return x
+    if x is None:
+        return None
+    key = str(x).strip().lower()
+    key = {
+        "float": "float32", "double": "float64", "half": "float16",
+        "bf16": "bfloat16", "f16": "float16", "f32": "float32", "f64": "float64",
+        "fp16": "float16", "fp32": "float32", "fp64": "float64",
+    }.get(key, key)
+    dt = getattr(torch, key, None)
+    if isinstance(dt, torch.dtype):
+        return dt
+    raise ValueError(f"Unknown dtype: {x!r}")
+
 class PairwiseCCM:
-    def __init__(self,device = "cpu"):
+    
+    def __init__(self,device = "cpu", dtype="float32", compute_dtype="float32"):
         """
         Constructs a FastCCM object to perform Convergent Cross Mapping (CCM) using PyTorch.
         This object is optimized for calculating pariwise CCM matrix and can handle large datasets by utilizing batch processing on GPUs or CPUs.
 
         Parameters:
             device (str): The computation device ('cpu' or 'cuda') to use for all calculations.
+            dtype (torch.dtype or str): Numeric dtype for internal tensors
+                ('float32' | 'float16' | 'bfloat16' | 'float64' or torch.dtype). Default: float32.
+            compute_dtype (torch.dtype or str or None): math-ops dtype. If None, uses dtype. 
         """
         self.device = device
+        self.dtype = _resolve_dtype(dtype) or torch.float32
+        self.compute_dtype = _resolve_dtype(compute_dtype) or self.dtype
+
+        # (Optional) sanity: ensure float type
+        if not (self.dtype.is_floating_point and self.compute_dtype.is_floating_point):
+            raise ValueError("dtype and compute_dtype must be floating dtypes.")
+        
+    def _to_compute(self, *tensors):
+        return [t.to(dtype=self.compute_dtype) for t in tensors]
+
+    def _cdist(self, a, b):
+        a, b = self._to_compute(a, b)
+        return torch.cdist(a, b, p=2, compute_mode="use_mm_for_euclid_dist")
 
     def compute(self, *args, **kwargs):
         warnings.warn("PairwiseCCM.compute → PairwiseCCM.score_matrix", DeprecationWarning)
@@ -335,30 +368,34 @@ class PairwiseCCM:
         # Find indices of a neighbors of X_sample among X_lib
         weights, indices = self.__get_nbrs_indices_with_weights(X_lib, X_sample, nbrs_num, nbrs_num_max, lib_indices, smpl_indices, exclusion_rad)
         # Reshaping for comfortable usage
-        I = indices.reshape(num_ts_X,-1).T 
-        
-        weights = torch.permute(weights,(1,2,0))[:,:,None,None].expand(-1,-1,max_E_Y, num_ts_Y,-1)
+        I = indices.reshape(num_ts_X, -1).T 
+
+        weights_c = torch.permute(weights, (1, 2, 0))[:, :, None, None].expand(-1, -1, max_E_Y, num_ts_Y, -1).to(self.compute_dtype)
+        #weights = torch.permute(weights, (1, 2, 0))[:, :, None, None].expand(-1, -1, max_E_Y, num_ts_Y, -1)
 
         # Pairwise crossmapping of all indices of embedding X to all embeddings of Y_shifted. Unreadble but optimized. 
         # Match every pair of Y_shifted i-th embedding with indices of X j-th 
-        Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:,I],(1,3,0,2))
+        Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:, I], (1, 3, 0, 2)).to(self.compute_dtype)
         
         # Average across nearest neighbors to get a prediction
         A = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
         #A[~nbrs_mask.T[None,:,None,None,:].expand(A.shape[0],-1,max_E_Y,num_ts_Y,-1)] = torch.nan
         #A = torch.nanmean(A,dim=1)
-        A = (A * weights).sum(axis=1)
+        A = (A * weights_c).sum(axis=1)
 
         if (Y_sample_shifted is None) and return_pred:
-            return A
+            return A.to(self.dtype)
 
-        B = torch.permute(Y_sample_shifted,(1,2,0))[:,:,:,None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
-        
-        # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X 
+
+        B = torch.permute(Y_sample_shifted, (1, 2, 0)).to(self.compute_dtype)[:, :, :, None] \
+            .expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
+        #B = torch.permute(Y_sample_shifted, (1, 2, 0))[:, :, :, None].expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
+
+        # Calculate correlation between all pairs of the real i-th Y and predicted i-th Y using crossmapping from j-th X
         r_AB = metric_fn(A, B)
 
         if return_pred:
-            return r_AB, A
+            return (r_AB, A.to(self.dtype))
         else:
             return r_AB
 
@@ -376,7 +413,7 @@ class PairwiseCCM:
         # Precompute library with intercept once 
         X_lib_intercept = torch.cat([torch.ones((num_ts_X, subset_size, 1), device=self.device), X_lib], dim=2)
 
-        A_all = torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=self.device)
+        A_all = torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=self.device, dtype=self.dtype)
 
         if sample_batch_size is None or sample_batch_size >= subsample_size:
             sample_batch_size = subsample_size
@@ -392,52 +429,51 @@ class PairwiseCCM:
                 lib=X_lib, sublib=X_sample_b,
                 subset_idx=lib_indices, sample_idx=smpl_indices[s0:s1],
                 exclusion_rad=exclusion_rad, theta=theta
-            )
+            ).to(self.compute_dtype)
 
             W = weights.unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size) \
                                 .reshape(num_ts_X * num_ts_Y * B, subset_size, 1)
 
-            X = X_lib.unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_X) \
+            X = X_lib.to(self.compute_dtype).unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_X) \
                                 .reshape(num_ts_X * num_ts_Y * B, subset_size, max_E_X)
 
-            Y = Y_lib_shifted.unsqueeze(1).unsqueeze(0).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_Y) \
+            Y = Y_lib_shifted.to(self.compute_dtype).unsqueeze(1).unsqueeze(0).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_Y) \
                                         .reshape(num_ts_X * num_ts_Y * B, subset_size, max_E_Y)
 
-            X_intercept = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, subset_size, 1), device=self.device), X], dim=2)
+            X_intercept = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, subset_size, 1), device=self.device, dtype=self.compute_dtype), X], dim=2)
 
             X_intercept_weighted = X_intercept * W
             Y_weighted = Y * W
 
             XTWX = torch.bmm(X_intercept_weighted.transpose(1, 2), X_intercept_weighted)
             if ridge and ridge > 0.0:
-                I = torch.eye(max_E_X + 1, device=self.device).expand_as(XTWX)
+                I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype).expand_as(XTWX)
                 XTWX = XTWX + ridge * I
             XTWy = torch.bmm(X_intercept_weighted.transpose(1, 2), Y_weighted)
 
             beta = torch.bmm(torch.pinverse(XTWX), XTWy) 
 
-            X_ = X_sample_b.unsqueeze(1).expand(num_ts_X, num_ts_Y, B, max_E_X) \
+            X_ = X_sample_b.to(self.compute_dtype).unsqueeze(1).expand(num_ts_X, num_ts_Y, B, max_E_X) \
                                         .reshape(num_ts_X * num_ts_Y * B, max_E_X)
-            X_ = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, 1), device=self.device), X_], dim=1) \
+            X_ = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, 1), device=self.device, dtype=self.compute_dtype), X_], dim=1) \
                 .reshape(num_ts_X * num_ts_Y * B, 1, max_E_X + 1)
 
             A = torch.bmm(X_, beta).reshape(num_ts_X, num_ts_Y, B, max_E_Y)
-            A = torch.permute(A, (2, 3, 1, 0))  # (B, max_E_Y, num_ts_Y, num_ts_X)
+            A = torch.permute(A, (2, 3, 1, 0)).to(self.dtype)  # (B, max_E_Y, num_ts_Y, num_ts_X)
 
             A_all[s0:s1] = A  
 
         if (Y_sample_shifted is None) and return_pred:
             return A_all
 
-        B_full = torch.permute(Y_sample_shifted, (1, 2, 0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X)
-        r_AB = metric_fn(A_all, B_full)
+        B_full = torch.permute(Y_sample_shifted, (1, 2, 0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X).to(self.compute_dtype)
+        r_AB = metric_fn(A_all.to(self.compute_dtype), B_full)
 
         if return_pred:
-            return r_AB, A_all
+            return (r_AB, A_all)
         else:
             return r_AB
         
-       
 
     def __get_random_indices(self, num_points, sample_len, generator=None):
         idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
@@ -446,17 +482,18 @@ class PairwiseCCM:
 
 
     def __get_random_sample(self, X, min_len, indices, dim, max_E):
-        X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device)
+        X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device, dtype=self.dtype)
 
         for i in range(dim):
-            X_buf[i,:,:X[i].shape[-1]] = torch.tensor(X[i][-min_len:],device=self.device)[indices]
+            Xi = torch.tensor(X[i][-min_len:],device=self.device, dtype=self.dtype)
+            X_buf[i, :, :X[i].shape[-1]] = Xi[indices]
 
         return X_buf
 
         
     def __get_nbrs_indices_with_weights(self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad):
-        eps = 1e-6
-        dist = torch.cdist(sample, lib,p=2, compute_mode="use_mm_for_euclid_dist")
+        
+        dist = self._cdist(sample, lib)
         
         # Mask out neighbors within the exclusion radius
         if exclusion_rad is None:
@@ -476,20 +513,22 @@ class PairwiseCCM:
             indices = indices[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
             near_dist = near_dist[selector].view(mask.shape[0], mask.shape[1], n_nbrs_max)
 
-
+        eps = torch.finfo(near_dist.dtype).eps
         # Calculate weights
-        near_dist_0 = near_dist[:, :, 0][:, :, None]
-        near_dist_0[near_dist_0 < eps] = eps
+        #near_dist_0 = near_dist[:, :, 0][:, :, None]
+        #near_dist_0[near_dist_0 < eps] = eps
+        near_dist_0 = torch.clamp(near_dist[:, :, 0][:, :, None], min=eps)
         weights = torch.exp(-near_dist / near_dist_0)
 
-        weights *= (torch.arange(n_nbrs_max,device=self.device).unsqueeze(0) < n_nbrs.unsqueeze(1))[:, None, :].expand(-1, weights.shape[1], -1).to(float)
-        weights = weights / weights.sum(dim=2, keepdim=True)
+        keep = (torch.arange(n_nbrs_max, device=self.device).unsqueeze(0) < n_nbrs.unsqueeze(1))
+        weights = weights * keep[:, None, :].expand(-1, weights.shape[1], -1).to(weights.dtype)
+        weights = weights / torch.clamp(weights.sum(dim=2, keepdim=True), min=eps)
         
-        return weights, indices
+        return weights.to(self.dtype), indices
 
 
     def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, theta):
-        dist = torch.cdist(sublib,lib,p=2, compute_mode="use_mm_for_euclid_dist")
+        dist = self._cdist(sublib, lib)
         if theta == None:
             weights = torch.exp(-(dist))
         else:
@@ -499,7 +538,7 @@ class PairwiseCCM:
         #if exclusion_rad > 0:
         if exclusion_rad is not None:
             exclusion_matrix = (torch.abs(subset_idx[None] - sample_idx[:,None]) > exclusion_rad)
-            weights = weights * exclusion_matrix
+            weights = weights * exclusion_matrix.to(weights.dtype)
     
-        return weights
+        return weights.to(self.dtype)
 

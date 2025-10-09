@@ -45,11 +45,23 @@ def get_td_embeddings(ts, opt_E, opt_tau):
         tdembs += [get_td_embedding_np(ts[i][:,None],opt_E[i],opt_tau[i])[:,:,0]]
     return tdembs
 
-def get_td_embedding_torch(ts, dim, stride, return_pred=False, tp=0):
-    tdemb = ts.unfold(0,(dim-1) * stride + 1,1)[...,::stride]
-    tdemb = torch.swapaxes(tdemb,-1,-2)
+def get_td_embedding_torch(ts, dim, stride, return_pred=False, tp=0, *, dtype=None, device=None):
+    """
+    Torch delay embedding.
+    ts: 1D or 2D torch tensor, first dim = time.
+    dtype/device: if provided, control output storage dtype/device.
+    """
+    if device is None:
+        device = ts.device
+    if dtype is None:
+        dtype = ts.dtype
+
+    ts = ts.to(device=device, dtype=dtype)
+    tdemb = ts.unfold(0, (dim - 1) * stride + 1, 1)[..., ::stride]  
+    tdemb = torch.swapaxes(tdemb, -1, -2) 
+
     if return_pred:
-        return tdemb[:tdemb.shape[0]-tp], ts[(dim-1) * stride + tp:]
+        return tdemb[: tdemb.shape[0] - tp], ts[(dim - 1) * stride + tp :]
     else:
         return tdemb
     
