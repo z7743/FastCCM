@@ -9,14 +9,14 @@ from matplotlib import cm
 
 
 class Functions:
-    def __init__(self, device="cpu"):
+    def __init__(self, device="cpu",dtype="float32", compute_dtype="float32"):
         """
         Initializes the CCMFunction with a PairwiseCCM instance.
 
         Parameters:
             device (str): The computation device ('cpu' or 'cuda') to use for all calculations.
         """
-        self.ccm = PairwiseCCM(device=device)
+        self.ccm = PairwiseCCM(device=device, dtype=dtype, compute_dtype=compute_dtype)
 
     def _resolve_sizes_compute_(self, X_emb, Y_emb, library_size, sample_size, tp):
         # Mirror PairwiseCCM.__ccm_core 'compute' defaults using GLOBAL min_len
@@ -260,13 +260,10 @@ class Functions:
 
         # Handle library_sizes
         if isinstance(library_sizes, str) and library_sizes == "auto":
+            lo = max(min_len // 100, 10)
+            hi = max(min_len, lo + 1)
             library_sizes = np.unique(
-                np.logspace(
-                    max(np.log10(min_len // 100), np.log10(10)), 
-                    np.log10(min_len), 
-                    num=10, 
-                    dtype=int
-                )
+                np.logspace(np.log10(lo), np.log10(hi), num=10, dtype=int)
             ).tolist()
         elif not isinstance(library_sizes, (list, np.ndarray)):
             raise ValueError("library_sizes must be either 'auto', a list, or a numpy array.")

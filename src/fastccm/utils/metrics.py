@@ -17,10 +17,11 @@ def _double_center(D: torch.Tensor) -> torch.Tensor:
 
 def batch_corr(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     # Pearson r across sample axis, keep [D,Y,X]
+    eps_t = torch.tensor(eps, dtype=A.dtype, device=A.device)
     muA = A.mean(dim=0, keepdim=True)
     muB = B.mean(dim=0, keepdim=True)
     num = ((A - muA) * (B - muB)).sum(dim=0)
-    den = torch.sqrt(((A - muA).pow(2)).sum(dim=0) * ((B - muB).pow(2)).sum(dim=0) + eps)
+    den = torch.sqrt(((A - muA).pow(2)).sum(dim=0) * ((B - muB).pow(2)).sum(dim=0) + eps_t)
     return num / den
 
 
@@ -37,7 +38,8 @@ def batch_mae(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
 
 def batch_rmse(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-    return torch.sqrt(batch_mse(A, B) + eps)
+    eps_t = torch.tensor(eps, dtype=A.dtype, device=A.device)
+    return torch.sqrt(batch_mse(A, B) + eps_t)
 
 
 def batch_neg_nrmse(A: torch.Tensor, B: torch.Tensor,
@@ -48,16 +50,18 @@ def batch_neg_nrmse(A: torch.Tensor, B: torch.Tensor,
     A,B: [S, D, Y, X]
     Returns: [D, Y, X] (value is identical along D for each (y,x))
     """
+    T_t  = torch.tensor(T,  dtype=A.dtype, device=A.device)
+    eps_t = torch.tensor(eps, dtype=A.dtype, device=A.device)
     # RMSE over (S, D) per (y, x)
     mse  = (A - B).pow(2).mean(dim=(0, 1))              # [Y, X]
-    rmse = torch.sqrt(mse + eps)                         # [Y, X]
+    rmse = torch.sqrt(mse + eps_t)                         # [Y, X]
 
     # Baseline: RMSE(mean over S, over D), i.e., std of B over (S, D)
     muB  = B.mean(dim=(0, 1), keepdim=True)             # [1, 1, Y, X]
     varB = (B - muB).pow(2).mean(dim=(0, 1))            # [Y, X]
-    rmse_base = torch.sqrt(varB + eps)                  # [Y, X]
+    rmse_base = torch.sqrt(varB + eps_t)                  # [Y, X]
 
-    neg_nrmse = torch.exp(- ((1.0 / T) * torch.pow(rmse / (rmse_base + eps), 2)))  # [Y, X]
+    neg_nrmse = torch.exp(- ((1.0 / T_t) * torch.pow(rmse / (rmse_base + eps_t), 2)))  # [Y, X]
     return neg_nrmse.unsqueeze(0).to(dtype=A.dtype)        # [1, Y, X]
 
 def batch_dcor(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -66,25 +70,24 @@ def batch_dcor(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-8) -> torch.Ten
     computed separately for each (y, x).
 
     Inputs:
-        A, B: [S, D, Y, X]
+        A, B: [S, D, Y, X]  (their dtype controls compute precision)
     Returns:
         dCor broadcast to [D, Y, X] (same value along D for each (y, x))
     """
-    # Promote to float64 for stable distance computations
-    A64 = A.to(torch.float64)
-    B64 = B.to(torch.float64)
+    wd = A.dtype
+    eps_t = torch.tensor(eps, dtype=wd, device=A.device)
 
-    S, D, Y, X = A64.shape
+    S, D, Y, X = A.shape
 
-    # Shape to batches over (y,x): [Y*X, S, D]
-    A2 = A64.permute(2, 3, 0, 1).reshape(-1, S, D)
-    B2 = B64.permute(2, 3, 0, 1).reshape(-1, S, D)
+    # reshape to [Y*X, S, D]
+    A2 = A.permute(2, 3, 0, 1).reshape(-1, S, D).to(wd)
+    B2 = B.permute(2, 3, 0, 1).reshape(-1, S, D).to(wd)
 
-    # Pairwise Euclidean distances over features D for each (y,x) block
+    # pairwise distances
     DA = torch.cdist(A2, A2, p=2, compute_mode="use_mm_for_euclid_dist")
     DB = torch.cdist(B2, B2, p=2, compute_mode="use_mm_for_euclid_dist")
 
-    # Double-centering per [S,S] block
+    # double-centering per block
     def _dc(M):
         mr = M.mean(dim=-1, keepdim=True)
         mc = M.mean(dim=-2, keepdim=True)
@@ -93,13 +96,13 @@ def batch_dcor(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-8) -> torch.Ten
 
     A_dc, B_dc = _dc(DA), _dc(DB)
 
-    # dCov / sqrt(dVarA * dVarB) per (y,x) block -> [Y*X]
+    # dCov / sqrt(dVarA * dVarB) per (y,x)
     dCov   = (A_dc * B_dc).mean(dim=(-1, -2))
     dVar_A = (A_dc.pow(2)).mean(dim=(-1, -2))
     dVar_B = (B_dc.pow(2)).mean(dim=(-1, -2))
-    dCor   = dCov / (torch.sqrt(dVar_A * dVar_B) + eps)
+    dCor   = dCov / (torch.sqrt(dVar_A * dVar_B) + eps_t)        
 
-    # Reshape to [Y, X], cast back, then broadcast to [D, Y, X] to keep the API
+    # reshape back and broadcast
     dCor_yx = dCor.reshape(Y, X).to(dtype=A.dtype)
     return dCor_yx.unsqueeze(0).expand(D, Y, X)
 
