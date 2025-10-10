@@ -25,16 +25,42 @@ def _resolve_dtype(x):
     raise ValueError(f"Unknown dtype: {x!r}")
 
 class PairwiseCCM:
-    
+    """
+    Pairwise Convergent Cross Mapping (CCM) in PyTorch.
+
+    Public API
+    ----------
+    • score_matrix(...)   -> CCM scores for all target/source pairs.
+    • predict_matrix(...) -> Predicted target embeddings for all pairs.
+
+    Notes
+    -----
+    • Inputs are Python lists of array-like 2D objects (NumPy arrays or Torch
+      tensors), one per time series, with shape (T, E) = (time, embedding_dim).
+    • When series in the input lists have different lengths, the implementation 
+      **left-truncates** each series to the common minimum length and 
+      **end-aligns** them. The **last time point is assumed to match at time t**, 
+      and earlier samples are dropped.
+    • When running on CPU with compute_dtype=float16, distances are promoted to
+      float32 to maintain numerical stability.
+    """
+
     def __init__(self,device = "cpu", dtype="float32", compute_dtype=None):
         """
         Create a PairwiseCCM instance.
 
-        Parameters:
-            device (str): The computation device ('cpu' or 'cuda') to use for all calculations.
-            dtype (torch.dtype or str): Numeric dtype for internal tensors
-                ('float32' | 'float16' | 'bfloat16' | 'float64' or torch.dtype). Default: float32.
-            compute_dtype (torch.dtype or str or None): math-ops dtype. If None, uses dtype. 
+        Parameters
+        ----------
+        device : {"cpu", "cuda", "cuda:0", ...}, default "cpu"
+            Device on which tensors will be allocated and computations performed.
+            Use a specific CUDA device string to select a GPU.
+        dtype : torch.dtype or str, default "float32"
+            Storage dtype for internal tensors and outputs. Accepts torch dtypes or
+            common strings like {"float16","float32","float64","bfloat16"} and aliases
+            {"f16","f32","f64","fp16","fp32","fp64","bf16"}.
+        compute_dtype : torch.dtype or str or None, default None
+            Math-ops dtype used for heavy linear algebra (e.g., distances, solves).
+            If None, uses the same value as `dtype`. 
         """
         self.device = device
         self.dtype = _resolve_dtype(dtype) or torch.float32
@@ -45,10 +71,22 @@ class PairwiseCCM:
             raise ValueError("dtype and compute_dtype must be floating dtypes.")
 
     def compute(self, *args, **kwargs):
+        """
+        DEPRECATED: Use `score_matrix(...)` instead.
+
+        This method forwards all arguments to `score_matrix(...)` and emits a
+        DeprecationWarning. See `score_matrix` for full parameter and return details.
+        """
         warnings.warn("PairwiseCCM.compute → PairwiseCCM.score_matrix", DeprecationWarning)
         return self.score_matrix(*args, **kwargs)
     
     def predict(self, *args, **kwargs):
+        """
+        DEPRECATED: Use `predict_matrix(...)` instead.
+
+        This method forwards all arguments to `predict_matrix(...)` and emits a
+        DeprecationWarning. See `predict_matrix` for full parameter and return details.
+        """
         warnings.warn("PairwiseCCM.predict → PairwiseCCM.predict_matrix", DeprecationWarning)
         return self.predict_matrix(*args, **kwargs)
 
@@ -63,60 +101,80 @@ class PairwiseCCM:
             method = "simplex", 
             seed = None, 
             metric = "corr",
-            batch_size=2048,
+            batch_size="auto",
             **kwargs
     ):
         """
-        Compute the pairwise CCM matrix between lists of delay-embedded time series.
-
+        Compute pairwise CCM scores for all embedding pairs.
+        
         Parameters
         ----------
-        X_emb : list[np.ndarray]
-            Source embeddings. Each entry is a 2D array of shape (T, E_x) where
-            T is time and E_x is the embedding dimension for that series.
-        Y_emb : list[np.ndarray] or None, optional
-            Target embeddings. Same structure as X_emb. If None, uses X_emb.
-        library_size : int or "auto" or None, optional
-            Size of the library (number of candidate neighbor points) drawn from each
-            series. If None, uses the maximum common length across series. If "auto",
-            uses min(max_common_len // 2, 700).
-        sample_size : int or "auto" or None, optional
-            Number of query/evaluation points where predictions are scored.
-            If None, uses the maximum common length across series. If "auto",
-            uses min(max_common_len // 6, 250).
-        exclusion_window : int or None, optional
-            Temporal exclusion radius in samples. When an int r is provided,
-            neighbors with |t_neighbor − t_query| ≤ r are excluded (self excluded when r=0).
-            When None, no temporal exclusion is applied (self can be included).
+        X_emb : list[array-like]
+            Source embeddings, one per series. Each item is 2D with shape (T_x, E_x),
+            where T_x is time steps and E_x is the embedding dimension for that series.
+            Accepts NumPy arrays or torch.Tensors; data are copied to `device`.
+        Y_emb : list[array-like] or None, default None
+            Target embeddings, same structure as X_emb. If None, uses X_emb (i.e.,
+            computes all-against-all within one set).
+        library_size : int or {"auto", None}, default None
+            Number of library points drawn from each series:
+            • None  -> use the maximum common length across series.
+            • "auto"-> min(max_common_len // 2, 700).
+            • int   -> use the provided count (clipped internally to valid range).
+            Library indices are sampled uniformly at random (reproducible with `seed`).
+        sample_size : int or {"auto", None}, default None
+            Number of query (evaluation) points drawn from each series:
+            • None  -> use the maximum common length across series.
+            • "auto"-> min(max_common_len // 6, 250).
+            • int   -> use the provided count (clipped internally to valid range).
+            Sample indices are drawn uniformly at random (reproducible with `seed`).
+        exclusion_window : int or None, default 0
+            Temporal exclusion radius (in samples). When an integer r is provided,
+            neighbors with |t_neighbor − t_query| ≤ r are excluded (including self when r>=0).
+            Use None to disable temporal exclusion entirely (self-neighbor allowed).
         tp : int, optional
-            Prediction horizon (lead). Predicts Y[t + tp] from X[t]. Default: 0.
-        method : {"simplex", "smap"}, optional
-            Local regressor: k-NN weighted average ("simplex") or locally weighted
-            linear ("smap").
-        metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, optional
-            Scoring function applied to (prediction, target). If a string, one of the
-            built-ins. If a callable, it must accept (A, B) with shapes
-            [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
-            Default: "corr".
+            Prediction horizon. Predict Y[t + tp] from X[t]. Default: 0.
+        method : {"simplex", "smap"}, default "simplex"
+            Local model used for neighbor-based prediction at each query point:
+            • "simplex": k-NN exponential weights (Sugihara's simplex method).
+            `nbrs_num` may be provided in `kwargs`; default is E_x + 1 per source series.
+            • "smap"   : Locally weighted linear regression with parameter `theta`
+            (default 1.0) and optional `ridge` (default 0.0) in `kwargs`.
+        seed : int or None, default None
+            Seed for deterministic sampling of library and sample indices.
+        metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, default "corr"
+            Scoring applied to (prediction, target).
+        batch_size : int or {"auto", None}, default "auto"
+            Number of query points processed per chunk. If "auto", a heuristic estimates
+            a safe chunk size targeting ~8 GB peak usage with some headroom. If None,
+            processes all at once (may be memory heavy).
 
         Other Parameters
         ----------------
-        nbrs_num : int, optional
-            Number of neighbors for "simplex". Default is E_x + 1 per source series.
-        theta : float, optional
-            Local weighting strength for "smap". Default: 1.0.
+        nbrs_num : int or list[int], optional (simplex only)
+            Number of neighbors per source series. If int, the same k is used for all.
+            Default is E_x + 1 for each source series.
+        theta : float, optional (smap only)
+            Local weighting strength; larger values induce steeper locality.
+            Default is 1.0.
+        ridge : float, optional (smap only)
+            Non-negative ridge penalty added to the local linear regression. Default 0.0.
 
         Returns
         -------
         np.ndarray
-            Array of Pearson correlations with shape (E_y, n_Y, n_X), where E_y is
-            the target embedding dimension for each Y series, n_Y is the number of
-            target series, and n_X is the number of source series.
+            CCM scores with shape (E_y, n_Y, n_X), where:
+            • E_y : maximum embedding dimension across targets,
+            • n_Y : number of target series,
+            • n_X : number of source series.
 
         Raises
         ------
         ValueError
-            If `method` is not one of {"simplex", "smap"} or required options are invalid.
+            If `method` is invalid or there are not enough points after applying `tp`.
+        RuntimeError
+            If all neighbors are excluded by `exclusion_window` for some queries.
+            Out-of-memory errors are surfaced after internal cache clearing.
         """
         if Y_emb is None:
             Y_emb = X_emb
@@ -152,56 +210,77 @@ class PairwiseCCM:
             method = "simplex", 
             seed = None,
             metric = "corr",
-            batch_size=2048,
+            batch_size="auto",
             **kwargs
     ):
         """
-        Predict target embeddings at given query points using a CCM model fit on a library.
+        Predict target embeddings at given query points for all (target, source) pairs.
 
         Parameters
         ----------
-        X_lib_emb : list[np.ndarray]
-            Source library embeddings. Each entry is (T_lib, E_x).
-        Y_lib_emb : list[np.ndarray] or None, optional
-            Target library embeddings. Same structure as X_lib_emb. If None, uses X_lib_emb.
-        X_pred_emb : list[np.ndarray] or None, optional
-            Source query embeddings at which predictions are evaluated. Each entry is
-            (T_pred, E_x). If None, uses X_lib_emb.
-        library_size : int or "auto" or None, optional
-            Number of library points drawn from each series. If None, uses the maximum
-            common library length. If "auto", uses min(max_lib_len // 2, 700).
-        exclusion_window : int or None, optional
-            Temporal exclusion radius in samples. When an int r is provided,
-            neighbors with |t_neighbor − t_query| ≤ r are excluded (self excluded when r=0).
-            When None, no temporal exclusion is applied (self can be included).
+        X_lib_emb : list[array-like]
+            Source library embeddings, one per series. Each item is 2D with shape
+            (T_lib, E_x). Accepts NumPy arrays or torch.Tensors.
+        Y_lib_emb : list[array-like] or None, default None
+            Target library embeddings, same structure as X_lib_emb. If None, uses X_lib_emb.
+            Targets are aligned using Y[t + tp] so ensure `tp` leaves enough points.
+        X_pred_emb : list[array-like] or None, default None
+            Source query embeddings at which to evaluate predictions, one per series,
+            shaped (T_pred, E_x). If None, uses X_lib_emb (predict-on-library).
+        library_size : int or {"auto", None}, default None
+            Number of library points drawn from each series:
+            • None  -> use the maximum common library length across series.
+            • "auto"-> min(max_lib_len // 2, 700).
+            • int   -> use the provided count (clipped internally to valid range).
+            Library indices are sampled uniformly at random (reproducible with `seed`).
+        exclusion_window : int or None, default 0
+            Temporal exclusion radius (in samples). When an integer r is provided,
+            neighbors with |t_neighbor − t_query| ≤ r are excluded (including self when r>=0).
+            Use None to disable temporal exclusion entirely (self-neighbor allowed).
         tp : int, optional
-            Prediction horizon (lead). Predicts Y[t + tp] from X[t]. Default: 0.
-        method : {"simplex", "smap"}, optional
-            Local regressor: "simplex" or "smap".
-        metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, optional
-            Scoring function applied to (prediction, target). If a string, one of the
-            built-ins. If a callable, it must accept (A, B) with shapes
-            [S, E_y, n_Y, n_X] and return [E_y, n_Y, n_X].
-            Default: "corr".
+            Prediction horizon. Predict Y[t + tp] from X[t]. Default: 0.
+        method : {"simplex", "smap"}, default "simplex"
+            Local model used for neighbor-based prediction at each query point:
+            • "simplex": k-NN exponential weights (Sugihara's simplex method).
+            `nbrs_num` may be provided in `kwargs`; default is E_x + 1 per source series.
+            • "smap"   : Locally weighted linear regression with parameter `theta`
+            (default 1.0) and optional `ridge` (default 0.0) in `kwargs`.
+        seed : int or None, default None
+            Seed for deterministic sampling of library and sample indices.
+        metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, default "corr"
+            Scoring applied to (prediction, target).
+        batch_size : int or {"auto", None}, default "auto"
+            Number of query points processed per chunk. If "auto", a heuristic estimates
+            a safe chunk size targeting ~8 GB peak usage with some headroom. If None,
+            processes all at once (may be memory heavy).
 
         Other Parameters
         ----------------
-        nbrs_num : int, optional
-            Number of neighbors for "simplex". Default is E_x + 1 per source series.
-        theta : float, optional
-            Local weighting strength for "smap". Default: 1.0.
+        nbrs_num : int or list[int], optional (simplex only)
+            Number of neighbors per source series. If int, the same k is used for all.
+            Default is E_x + 1 for each source series.
+        theta : float, optional (smap only)
+            Local weighting strength; larger values induce steeper locality.
+            Default is 1.0.
+        ridge : float, optional (smap only)
+            Non-negative ridge penalty added to the local linear regression. Default 0.0.
 
         Returns
         -------
         np.ndarray
-            Predicted target embeddings with shape (T_pred, E_y, n_Y, n_X), where
-            T_pred is the number of query points, E_y is the target embedding
-            dimension, n_Y is number of targets, and n_X is number of sources.
+            Predicted target embeddings with shape (T_pred, E_y, n_Y, n_X), where:
+            • T_pred : number of query points per source series,
+            • E_y    : maximum embedding dimension across targets,
+            • n_Y    : number of target series,
+            • n_X    : number of source series.
 
         Raises
         ------
         ValueError
-            If `method` is not one of {"simplex", "smap"} or required options are invalid.
+            If `method` is invalid or there are not enough points after applying `tp`.
+        RuntimeError
+            If all neighbors are excluded by `exclusion_window` for some queries.
+            Out-of-memory errors are surfaced after internal cache clearing.
         """
         if Y_lib_emb is None:
             Y_lib_emb = X_lib_emb
