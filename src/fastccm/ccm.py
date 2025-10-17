@@ -102,6 +102,7 @@ class PairwiseCCM:
             seed = None, 
             metric = "corr",
             batch_size="auto",
+            clean_after=True,
             **kwargs
     ):
         """
@@ -148,6 +149,10 @@ class PairwiseCCM:
             Number of query points processed per chunk. If "auto", a heuristic estimates
             a safe chunk size targeting ~8 GB peak usage with some headroom. If None,
             processes all at once (may be memory heavy).
+        clean_after : bool, default False
+            If True, run a cleanup after returning (calls Python GC and clears
+            PyTorch/CUDA caching allocators). Keep False inside loops for
+            performance.
 
         Other Parameters
         ----------------
@@ -196,7 +201,8 @@ class PairwiseCCM:
         )
 
         r_AB = r_AB.to("cpu").numpy()
-        self._soft_clear()
+        if clean_after:
+            self._soft_clear()
         return r_AB
 
     def predict_matrix(
@@ -211,6 +217,7 @@ class PairwiseCCM:
             seed = None,
             metric = "corr",
             batch_size="auto",
+            clean_after=True,
             **kwargs
     ):
         """
@@ -253,6 +260,10 @@ class PairwiseCCM:
             Number of query points processed per chunk. If "auto", a heuristic estimates
             a safe chunk size targeting ~8 GB peak usage with some headroom. If None,
             processes all at once (may be memory heavy).
+        clean_after : bool, default False
+            If True, run a cleanup after returning (calls Python GC and clears
+            PyTorch/CUDA caching allocators). Keep False inside loops for
+            performance.
 
         Other Parameters
         ----------------
@@ -304,7 +315,8 @@ class PairwiseCCM:
         )
 
         A = A.to("cpu").numpy()
-        self._soft_clear()
+        if clean_after:
+            self._soft_clear()
         return A
 
     @torch.inference_mode()
@@ -333,11 +345,10 @@ class PairwiseCCM:
         max_E_Y = torch.tensor([Y_lib_list[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
 
         if mode == "score":
-            min_len = torch.tensor(
-                [Y_lib_list[i].shape[0] for i in range(num_ts_Y)] +
-                [X_lib_list[i].shape[0] for i in range(num_ts_X)],
-                device=self.device
-            ).min().item()
+            min_len = min(
+                min(y.shape[0] for y in Y_lib_list),
+                min(x.shape[0] for x in X_lib_list)
+            )
             if min_len - tp <= 0:
                 raise ValueError("Not enough points after applying tp.")
         else:
@@ -348,7 +359,13 @@ class PairwiseCCM:
                 [X_lib_list[i].shape[0] for i in range(num_ts_X)],
                 device=self.device
             ).min().item()
-            min_len_pred = torch.tensor([X_sample_list[i].shape[0] for i in range(num_ts_X)], device=self.device).min().item()
+
+            min_len_lib = min(
+                min(y.shape[0] for y in Y_lib_list),
+                min(x.shape[0] for x in X_lib_list)
+            )
+            min_len_pred = min(x.shape[0] for x in X_sample_list)
+
             if min_len_lib - tp <= 0 or min_len_pred <= 0:
                 raise ValueError("Not enough points for library or prediction.")
 
@@ -596,16 +613,20 @@ class PairwiseCCM:
         
 
     def __get_random_indices(self, num_points, sample_len, generator=None):
-        idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
+        #idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
 
-        return idxs_X
+        return torch.randperm(num_points, device=self.device, generator=generator)[:sample_len]
 
 
     def __get_random_sample(self, X, min_len, indices, dim, max_E):
         X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device, dtype=self.dtype)
 
         for i in range(dim):
-            Xi = torch.tensor(X[i][-min_len:],device=self.device, dtype=self.dtype)
+            Xi_src = X[i]
+            if isinstance(Xi_src, torch.Tensor):
+                Xi = Xi_src.to(device=self.device, dtype=self.dtype, copy=False)[-min_len:]
+            else:
+                Xi = torch.as_tensor(Xi_src[-min_len:], device=self.device, dtype=self.dtype)
             X_buf[i, :, :X[i].shape[-1]] = Xi[indices]
 
         return X_buf
@@ -682,8 +703,8 @@ class PairwiseCCM:
         if self.device.startswith("cpu") and comp == torch.float16:
             comp = torch.float32
         try:
-            a = a.to(dtype=comp)
-            b = b.to(dtype=comp)
+            a = self.__to_tensor(a, dtype=comp)
+            b = self.__to_tensor(b, dtype=comp)
             return torch.cdist(a, b, p=2, compute_mode="use_mm_for_euclid_dist")
         except RuntimeError as e:
             if self._is_oom(e):
@@ -727,11 +748,8 @@ class PairwiseCCM:
         cbytes = torch.tensor([], dtype=self.compute_dtype).element_size()
         dbytes = torch.tensor([], dtype=self.dtype).element_size()
 
-        # 1) distances + local weights (nX * L) each
         dist_w_per_sample = (cbytes + dbytes) * (num_ts_X * L)
 
-        # 2) Expanded row stacks used in weighted normal equations
-        #    W, X, Y, X_intercept, X_intercept_weighted, Y_weighted  (all ~ P * L * ...)
         rows_per_sample = cbytes * (
             P * L * (1         # W
                     + max_E_X # X
@@ -741,17 +759,14 @@ class PairwiseCCM:
                     + max_E_Y)      # Y_weighted
         )
 
-        # 3) Normal equations and solve buffers per sample
         ne_per_sample = cbytes * (
             P * ((max_E_X + 1) * (max_E_X + 1)   # XTWX
                 + (max_E_X + 1) * max_E_Y      # XTWy / beta
                 + (max_E_X + 1))               # X_ (query design)
         )
 
-        # (A_all is preallocated; not included in per-sample peak)
         per_sample_bytes = int(dist_w_per_sample + rows_per_sample + ne_per_sample)
 
-        # Budget with some headroom
         budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
 
         if per_sample_bytes <= 0:
@@ -777,30 +792,20 @@ class PairwiseCCM:
         nX, nY, Ey, K       = int(num_ts_X), int(num_ts_Y), int(max_EY), int(nbrs_num_max)
 
         # dtype sizes
-        cbytes = torch.tensor([], dtype=self.compute_dtype).element_size()  # compute dtype
-        dbytes = torch.tensor([], dtype=self.dtype).element_size()          # model/output dtype
+        cbytes = torch.tensor([], dtype=self.compute_dtype).element_size()  
+        dbytes = torch.tensor([], dtype=self.dtype).element_size()        
         ibytes = 8  # int64 indices
 
-        # Per-sample (B=1) estimates:
-
-        # 1) full pairwise distances: (nX, 1, L)
         cdist_per_sample = cbytes * (nX * L)
 
-        # 2) topk KNN bookkeeping per sample (weights + indices): (nX, 1, K)
         knn_per_sample = (dbytes + ibytes) * (nX * K)
 
-        # 3) your core 5D tensors for one sample:
-        #    weights_c:     (1, K, Ey, nY, nX)
-        #    gathered Y:    (1, K, Ey, nY, nX)
-        #    product/sum:   same shape in compute dtype (we count one more copy)
         core_5d_per_sample = cbytes * (3 * K * Ey * nY * nX)
 
-        # 4) output slice per sample: (Ey, nY, nX) in self.dtype
         out_per_sample = dbytes * (Ey * nY * nX)
 
         per_sample_bytes = int(cdist_per_sample + knn_per_sample + core_5d_per_sample + out_per_sample)
 
-        # Budget (leave headroom)
         budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
 
         if per_sample_bytes <= 0:
@@ -812,3 +817,10 @@ class PairwiseCCM:
         if B > int(S):
             B = int(S)
         return int(B)
+    
+    def __to_tensor(self, arr, *, dtype=None, device=None):
+        dtype  = self.dtype  if dtype  is None else dtype
+        device = self.device if device is None else device
+        if isinstance(arr, torch.Tensor):
+            return arr.to(device=device, dtype=dtype, copy=False)
+        return torch.as_tensor(arr, device=device, dtype=dtype)

@@ -255,8 +255,11 @@ class Functions:
 
         num_ts_X = len(X_emb)
         num_ts_Y = len(Y_emb)
-        min_len = torch.tensor([Y_emb[i].shape[0] for i in range(num_ts_Y)] + 
-                               [X_emb[i].shape[0] for i in range(num_ts_X)]).min().item()
+
+        min_len = min(
+            min(y.shape[0] for y in Y_emb),
+            min(x.shape[0] for x in X_emb)
+        )
 
         # Handle library_sizes
         if isinstance(library_sizes, str) and library_sizes == "auto":
@@ -286,7 +289,7 @@ class Functions:
                     library_size=size, sample_size=sample_size,
                     exclusion_window=exclusion_window, tp=tp,
                     method=method,
-                    seed=trial_seed_xy, metric=metric, **kwargs
+                    seed=trial_seed_xy, metric=metric, clean_after=False, **kwargs
                 ))
 
                 # Calculate CCM for Y -> X
@@ -295,7 +298,7 @@ class Functions:
                     library_size=size, sample_size=sample_size,
                     exclusion_window=exclusion_window, tp=tp,
                     method=method,
-                    seed=trial_seed_yx, metric=metric, **kwargs
+                    seed=trial_seed_yx, metric=metric, clean_after=False, **kwargs
                 ))
                 
             # Store results for current subset size
