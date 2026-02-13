@@ -4,7 +4,7 @@ import warnings
 import os
 import torch
 from .utils.metrics import get_metric
-
+import math
 #torch.set_num_threads(os.cpu_count())  
 #torch.set_num_interop_threads(1)
 
@@ -560,41 +560,40 @@ class PairwiseCCM:
                     exclusion_rad=exclusion_rad, theta=theta
                 ).to(self.compute_dtype)
 
-                W = weights.unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size) \
-                                    .reshape(num_ts_X * num_ts_Y * B, subset_size, 1)
+                w2 = weights * weights  # (nX, B, L)
 
-                X = X_lib.to(self.compute_dtype).unsqueeze(1).unsqueeze(1).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_X) \
-                                    .reshape(num_ts_X * num_ts_Y * B, subset_size, max_E_X)
+                Xc = X_lib.to(self.compute_dtype)         # (nX, L, Ex)
+                Yc = Y_lib_shifted.to(self.compute_dtype) # (nY, L, Ey)
 
-                Y = Y_lib_shifted.to(self.compute_dtype).unsqueeze(1).unsqueeze(0).expand(num_ts_X, num_ts_Y, B, subset_size, max_E_Y) \
-                                            .reshape(num_ts_X * num_ts_Y * B, subset_size, max_E_Y)
+                onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
+                Xint  = torch.cat([onesL, Xc], dim=2)     # (nX, L, Ex1)
 
-                X_intercept = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, subset_size, 1), device=self.device, dtype=self.compute_dtype), X], dim=2)
-
-                X_intercept_weighted = X_intercept * W
-                Y_weighted = Y * W
-
-                XTWX = torch.bmm(X_intercept_weighted.transpose(1, 2), X_intercept_weighted)
+                # XTWX: (nX, B, Ex1, Ex1)
+                XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, w2, Xint)
                 if ridge and ridge > 0.0:
-                    I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype).expand_as(XTWX)
+                    I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
                     XTWX = XTWX + ridge * I
-                XTWy = torch.bmm(X_intercept_weighted.transpose(1, 2), Y_weighted)
 
-                L = torch.linalg.cholesky(XTWX)         
-                beta = torch.cholesky_solve(XTWy, L)
-                #beta = torch.bmm(torch.pinverse(XTWX), XTWy) 
+                # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
+                XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, w2, Yc).reshape(
+                    num_ts_X, B, max_E_X + 1, num_ts_Y * max_E_Y
+                )
 
-                X_ = X_sample_b.to(self.compute_dtype).unsqueeze(1).expand(num_ts_X, num_ts_Y, B, max_E_X) \
-                                            .reshape(num_ts_X * num_ts_Y * B, max_E_X)
-                X_ = torch.cat([torch.ones((num_ts_X * num_ts_Y * B, 1), device=self.device, dtype=self.compute_dtype), X_], dim=1) \
-                    .reshape(num_ts_X * num_ts_Y * B, 1, max_E_X + 1)
+                Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)
+                beta  = torch.cholesky_solve(XTWy, Lchol)           # (nX, B, Ex1, nY*Ey)
 
-                A = torch.bmm(X_, beta).reshape(num_ts_X, num_ts_Y, B, max_E_Y)
-                A = torch.permute(A, (2, 3, 1, 0)).to(self.dtype)  # (B, max_E_Y, num_ts_Y, num_ts_X)
+                Xq = X_sample_b.to(self.compute_dtype)              # (nX, B, Ex)
+                Xq = torch.cat(
+                    [torch.ones((num_ts_X, B, 1), device=self.device, dtype=self.compute_dtype), Xq],
+                    dim=2
+                )                                                   # (nX, B, Ex1)
 
-                A_all[s0:s1] = A  
-                
-                del weights, W, X, Y, X_intercept, X_intercept_weighted, Y_weighted, XTWX, XTWy, beta, X_, A
+                pred_flat = torch.matmul(Xq.unsqueeze(2), beta).squeeze(2)  # (nX, B, nY*Ey)
+
+                A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
+                A_all[s0:s1] = A.to(self.dtype)
+
+                del w2, Xc, Yc, onesL, Xint, XTWX, XTWy, Lchol, beta, Xq, pred_flat, A
             except RuntimeError as e:
                 if self._is_oom(e):
                     self._hard_clear()
