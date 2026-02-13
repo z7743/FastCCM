@@ -7,23 +7,20 @@ PyTorch-based implementation of Convergent Cross Mapping (CCM) optimized for cal
 
 **CPU-only:**
 ```bash
-pip install --upgrade pip
 pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
-pip install "fastccm @ git+https://github.com/z7743/FastCCM.git@v0.2.2"
+pip install fastccm
 ```
 
 **CUDA:**
 ```bash
-pip install --upgrade pip
 pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
-pip install "fastccm @ git+https://github.com/z7743/FastCCM.git@v0.2.2"
+pip install fastccm
 ```
 
 **macOS (CPU/MPS):**
 ```bash
-pip install --upgrade pip
 pip install torch==2.3.1
-pip install "fastccm @ git+https://github.com/z7743/FastCCM.git@v0.2.2"
+pip install fastccm
 ```
 
 ## Quick start
