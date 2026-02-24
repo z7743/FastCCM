@@ -354,12 +354,6 @@ class PairwiseCCM:
         else:
             if X_sample_list is None:
                 raise ValueError("X_sample_list is required in 'predict' mode.")
-            min_len_lib = torch.tensor(
-                [Y_lib_list[i].shape[0] for i in range(num_ts_Y)] +
-                [X_lib_list[i].shape[0] for i in range(num_ts_X)],
-                device=self.device
-            ).min().item()
-
             min_len_lib = min(
                 min(y.shape[0] for y in Y_lib_list),
                 min(x.shape[0] for x in X_lib_list)
@@ -503,19 +497,17 @@ class PairwiseCCM:
                     self._hard_clear()
                 raise
 
-            I = indices.reshape(num_ts_X, -1).T
-
-            weights_c = torch.permute(weights, (1, 2, 0))[:, :, None, None] \
-                            .expand(-1, -1, max_E_Y, num_ts_Y, -1).to(self.compute_dtype)
-
-            
-            Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:, I], (1, 3, 0, 2)).to(self.compute_dtype)
-            A_blk = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
-            A_blk = (A_blk * weights_c).sum(axis=1)  # (B, E_y, n_Y, n_X)
+            # Gather Y values for all (source, batch, neighbor) combinations and compute
+            # weighted sum in one einsum, avoiding materializing the expanded weight tensor.
+            # Y_lib_shifted[:, indices, :]: (n_Y, n_X, B, K, E_y)
+            # weights:                      (n_X, B, K)
+            # output A_blk:                 (B, E_y, n_Y, n_X)
+            Y_indexed = Y_lib_shifted[:, indices, :].to(self.compute_dtype)
+            A_blk = torch.einsum('yxbke,xbk->beyx', Y_indexed, weights.to(self.compute_dtype))
 
             A[s0:s1] = A_blk.to(self.dtype)
 
-            del weights, indices, I, weights_c, Y_lib_shifted_indexed, A_blk
+            del weights, indices, Y_indexed, A_blk
 
         if (Y_sample_shifted is None) and return_pred:
             return A
@@ -618,16 +610,22 @@ class PairwiseCCM:
 
 
     def __get_random_sample(self, X, min_len, indices, dim, max_E):
-        X_buf = torch.zeros((dim, indices.shape[0], max_E),device=self.device, dtype=self.dtype)
-
+        tensors = []
         for i in range(dim):
             Xi_src = X[i]
             if isinstance(Xi_src, torch.Tensor):
-                Xi = Xi_src.to(device=self.device, dtype=self.dtype, copy=False)[-min_len:]
+                tensors.append(Xi_src.to(device=self.device, dtype=self.dtype, copy=False)[-min_len:])
             else:
-                Xi = torch.as_tensor(Xi_src[-min_len:], device=self.device, dtype=self.dtype)
-            X_buf[i, :, :X[i].shape[-1]] = Xi[indices]
+                tensors.append(torch.as_tensor(Xi_src[-min_len:], device=self.device, dtype=self.dtype))
 
+        # Fast path: all series share the same embedding dimension -- single batched index
+        if all(t.shape[-1] == max_E for t in tensors):
+            return torch.stack(tensors)[:, indices, :]
+
+        # General path: zero-pad series whose embedding dim is smaller than max_E
+        X_buf = torch.zeros((dim, indices.shape[0], max_E), device=self.device, dtype=self.dtype)
+        for i, t in enumerate(tensors):
+            X_buf[i, :, :t.shape[-1]] = t[indices]
         return X_buf
 
     def __get_nbrs_indices_with_weights(

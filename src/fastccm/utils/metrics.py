@@ -18,10 +18,10 @@ def _double_center(D: torch.Tensor) -> torch.Tensor:
 def batch_corr(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     # Pearson r across sample axis, keep [D,Y,X]
     eps_t = torch.tensor(eps, dtype=A.dtype, device=A.device)
-    muA = A.mean(dim=0, keepdim=True)
-    muB = B.mean(dim=0, keepdim=True)
-    num = ((A - muA) * (B - muB)).sum(dim=0)
-    den = torch.sqrt(((A - muA).pow(2)).sum(dim=0) * ((B - muB).pow(2)).sum(dim=0) + eps_t)
+    dA = A - A.mean(dim=0, keepdim=True)
+    dB = B - B.mean(dim=0, keepdim=True)
+    num = (dA * dB).sum(dim=0)
+    den = torch.sqrt(dA.pow(2).sum(dim=0) * dB.pow(2).sum(dim=0) + eps_t)
     return num / den
 
 
