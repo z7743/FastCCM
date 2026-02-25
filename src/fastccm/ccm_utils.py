@@ -6,6 +6,7 @@ from fastccm import PairwiseCCM
 from fastccm.utils.utils import get_td_embedding_np
 import matplotlib.pyplot as plt
 from matplotlib import cm
+import os
 
 
 class Functions:
@@ -17,6 +18,27 @@ class Functions:
             device (str): The computation device ('cpu' or 'cuda') to use for all calculations.
         """
         self.ccm = PairwiseCCM(device=device, dtype=dtype, compute_dtype=compute_dtype)
+
+    def _make_out_array(self, shape, dtype=np.float32, out_path=None, fill_value=np.nan, order="C"):
+        """
+        """
+        if out_path is None:
+            arr = np.full(shape, fill_value, dtype=dtype, order=order)
+            return arr
+
+        out_path = os.fspath(out_path)
+        parent = os.path.dirname(out_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        mm = np.memmap(out_path, mode="w+", dtype=dtype, shape=shape, order=order)
+
+        # Fill (NaN fill requires float dtype)
+        if fill_value is not None:
+            mm[...] = fill_value
+            mm.flush()
+
+        return mm
 
     def _resolve_sizes_compute_(self, X_emb, Y_emb, library_size, sample_size, tp):
         # Mirror PairwiseCCM.__ccm_core 'compute' defaults using GLOBAL min_len
@@ -76,6 +98,8 @@ class Functions:
         method="simplex",
         seed=None,
         metric="corr",
+        out_path=None,         
+        out_dtype=np.float32,  
         **kwargs
     ):
         """
@@ -94,10 +118,12 @@ class Functions:
         E_y_max = max(y.shape[-1] for y in Y_emb)
 
         # Preallocate and fill with NaN (in case some Y have smaller E)
-        out = np.full((E_y_max, nY, nX), np.nan, dtype=np.float32)
+        #out = np.full((E_y_max, nY, nX), np.nan, dtype=np.float32)
 
         # Resolve sizes globally so each block uses identical sampling defaults
         L_res, S_res = self._resolve_sizes_compute_(X_emb, Y_emb, library_size, sample_size, tp)
+
+        out = self._make_out_array((E_y_max, nY, nX), dtype=out_dtype, out_path=out_path, fill_value=np.nan)
 
         for y0 in range(0, nY, y_block):
             y1 = min(y0 + y_block, nY)
@@ -120,6 +146,9 @@ class Functions:
                 Ey_blk = r_blk.shape[0]
                 out[:Ey_blk, y0:y1, x0:x1] = r_blk
 
+                if isinstance(out, np.memmap):
+                    out.flush()
+
         return out
 
     def predict_matrix_blocked(
@@ -136,6 +165,8 @@ class Functions:
         method="simplex",
         seed=None,
         metric="corr",
+        out_path=None,          
+        out_dtype=np.float32,   
         **kwargs
     ):
         """
@@ -162,7 +193,8 @@ class Functions:
         else:
             X_pred_trimmed = [x[:S_pred] for x in X_pred_emb]
 
-        out = np.full((S_pred, E_y_max, nY, nX), np.nan, dtype=np.float32)
+        #out = np.full((S_pred, E_y_max, nY, nX), np.nan, dtype=np.float32)
+        out = self._make_out_array((S_pred, E_y_max, nY, nX), dtype=out_dtype, out_path=out_path, fill_value=np.nan)
 
         for y0 in range(0, nY, y_block):
             y1 = min(y0 + y_block, nY)
@@ -184,6 +216,9 @@ class Functions:
 
                 Ey_blk = A_blk.shape[1]
                 out[:, :Ey_blk, y0:y1, x0:x1] = A_blk
+
+                if isinstance(out, np.memmap):
+                    out.flush()
 
         return out
 
