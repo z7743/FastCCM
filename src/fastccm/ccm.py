@@ -8,9 +8,11 @@ import math
 import logging
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
-#torch.set_num_threads(os.cpu_count())  
-#torch.set_num_interop_threads(1)
+torch.set_num_threads(os.cpu_count())  
+torch.set_num_interop_threads(1)
+
 
 class _MicrosecondFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
@@ -558,6 +560,7 @@ class PairwiseCCM:
                 X_lib, X_sample, Y_lib_s, Y_smp_s,
                 exclusion_window, nbrs_num, metric_fn=metric_fn,
                 return_pred=(Y_smp_s is None), sample_batch_size=batch_size,
+                nbrs_num_max=int(nbrs_num_max),
             )
 
 
@@ -598,7 +601,8 @@ class PairwiseCCM:
     @torch.inference_mode()
     def __simplex_prediction(self, lib_indices, smpl_indices,
                               X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, 
-                              exclusion_rad, nbrs_num, metric_fn, return_pred=False, sample_batch_size=None):
+                              exclusion_rad, nbrs_num, metric_fn, return_pred=False, sample_batch_size=None,
+                              nbrs_num_max=None):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
@@ -607,7 +611,8 @@ class PairwiseCCM:
         if (sample_batch_size is None) or (sample_batch_size >= subsample_size):
             sample_batch_size = subsample_size
 
-        nbrs_num_max = nbrs_num.max().item()
+        if nbrs_num_max is None:
+            nbrs_num_max = int(nbrs_num.max().item())
         self.logger.debug(
             "Entering simplex backend (queries=%d, library_points=%d, num_sources=%d, num_targets=%d, Ey=%d, nbrs_max=%d, batch_size=%d, num_batches=%d, exclusion=%s)",
             int(subsample_size),
@@ -628,56 +633,50 @@ class PairwiseCCM:
                 "Simplex batch [%d:%d) started (batch_queries=%d)",
                 int(s0), int(s1), int(s1 - s0)
             )
-            t_batch = self._tic()
+            timings = {}
+            t_batch = self._tic() if self._debug_enabled() else None
 
             try:
-                t = self._tic()
-                weights, indices = self.__get_nbrs_indices_with_weights(
-                    X_lib, X_sample[:, s0:s1, :],
-                    nbrs_num, nbrs_num_max, lib_indices, smpl_indices[s0:s1],
-                    exclusion_rad
-                )
-                t_neighbors = self._toc_ms(t)
+                with self._time_block(timings, "neighbors"):
+                    weights, indices = self.__get_nbrs_indices_with_weights(
+                        X_lib, X_sample[:, s0:s1, :],
+                        nbrs_num, nbrs_num_max, lib_indices, smpl_indices[s0:s1],
+                        exclusion_rad
+                    )
             except RuntimeError as e:
                 if self._is_oom(e):
                     self.logger.warning("OOM in simplex batch [%d:%d): %s", int(s0), int(s1), str(e))
                     self._hard_clear()
                 raise
 
-            t = self._tic()
-            I = indices.reshape(num_ts_X, -1).T
-            t_index = self._toc_ms(t)
+            with self._time_block(timings, "indexing"):
+                I = indices.reshape(num_ts_X, -1).T
 
-            t = self._tic()
-            weights_c = torch.permute(weights, (1, 2, 0))[:, :, None, None] \
-                            .expand(-1, -1, max_E_Y, num_ts_Y, -1).to(self.compute_dtype)
-            t_weight_expand = self._toc_ms(t)
+            with self._time_block(timings, "weights_expand"):
+                weights_c = torch.permute(weights, (1, 2, 0))[:, :, None, None] \
+                                .expand(-1, -1, max_E_Y, num_ts_Y, -1).to(self.compute_dtype)
 
-            t = self._tic()
-            Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:, I], (1, 3, 0, 2)).to(self.compute_dtype)
-            t_gather = self._toc_ms(t)
+            with self._time_block(timings, "gather"):
+                Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:, I], (1, 3, 0, 2)).to(self.compute_dtype)
 
-            t = self._tic()
-            A_blk = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
-            A_blk = (A_blk * weights_c).sum(axis=1)  # (B, E_y, n_Y, n_X)
-            t_avg = self._toc_ms(t)
+            with self._time_block(timings, "weighted_avg"):
+                A_blk = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
+                A_blk = (A_blk * weights_c).sum(axis=1)  # (B, E_y, n_Y, n_X)
 
-            t = self._tic()
-            A[s0:s1] = A_blk.to(self.dtype)
-            t_store = self._toc_ms(t)
+            with self._time_block(timings, "store"):
+                A[s0:s1] = A_blk.to(self.dtype)
 
-            self.logger.debug(
-                "Simplex batch [%d:%d) timings: neighbors=%s indexing=%s weights_expand=%s gather=%s weighted_avg=%s store=%s total=%s",
-                int(s0),
-                int(s1),
-                self._format_ms(t_neighbors),
-                self._format_ms(t_index),
-                self._format_ms(t_weight_expand),
-                self._format_ms(t_gather),
-                self._format_ms(t_avg),
-                self._format_ms(t_store),
-                self._format_ms(self._toc_ms(t_batch)),
-            )
+            if self._debug_enabled():
+                timings["total"] = self._toc_ms(t_batch)
+                self.logger.debug(
+                    "Simplex batch [%d:%d) timings: %s",
+                    int(s0),
+                    int(s1),
+                    self._timings_summary(
+                        timings,
+                        order=["neighbors", "indexing", "weights_expand", "gather", "weighted_avg", "store", "total"],
+                    ),
+                )
 
             del weights, indices, I, weights_c, Y_lib_shifted_indexed, A_blk
 
@@ -732,93 +731,76 @@ class PairwiseCCM:
                 "SMAP batch [%d:%d) started (batch_queries=%d)",
                 int(s0), int(s1), int(s1 - s0)
             )
-            t_batch = self._tic()
+            timings = {}
+            t_batch = self._tic() if self._debug_enabled() else None
 
             # Slice the queries 
-            t = self._tic()
-            X_sample_b = X_sample[:, s0:s1, :]  # (num_ts_X, B, max_E_X)
-            t_slice = self._toc_ms(t)
+            with self._time_block(timings, "slice"):
+                X_sample_b = X_sample[:, s0:s1, :]  # (num_ts_X, B, max_E_X)
 
             try:
-                t = self._tic()
-                weights = self.__get_local_weights(
-                    lib=X_lib, sublib=X_sample_b,
-                    subset_idx=lib_indices, sample_idx=smpl_indices[s0:s1],
-                    exclusion_rad=exclusion_rad, theta=theta
-                ).to(self.compute_dtype)
-                t_weights = self._toc_ms(t)
+                with self._time_block(timings, "local_weights"):
+                    weights = self.__get_local_weights(
+                        lib=X_lib, sublib=X_sample_b,
+                        subset_idx=lib_indices, sample_idx=smpl_indices[s0:s1],
+                        exclusion_rad=exclusion_rad, theta=theta
+                    ).to(self.compute_dtype)
 
-                t = self._tic()
-                w2 = weights * weights  # (nX, B, L)
-                t_square = self._toc_ms(t)
+                with self._time_block(timings, "square"):
+                    w2 = weights * weights  # (nX, B, L)
 
-                t = self._tic()
-                Xc = X_lib.to(self.compute_dtype)         # (nX, L, Ex)
-                Yc = Y_lib_shifted.to(self.compute_dtype) # (nY, L, Ey)
-                t_cast_xy = self._toc_ms(t)
+                with self._time_block(timings, "cast_xy"):
+                    Xc = X_lib.to(self.compute_dtype)         # (nX, L, Ex)
+                    Yc = Y_lib_shifted.to(self.compute_dtype) # (nY, L, Ey)
 
-                t = self._tic()
-                onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
-                Xint  = torch.cat([onesL, Xc], dim=2)     # (nX, L, Ex1)
-                t_design = self._toc_ms(t)
+                with self._time_block(timings, "design"):
+                    onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
+                    Xint  = torch.cat([onesL, Xc], dim=2)     # (nX, L, Ex1)
 
                 # XTWX: (nX, B, Ex1, Ex1)
-                t = self._tic()
-                XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, w2, Xint)
-                if ridge and ridge > 0.0:
-                    I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
-                    XTWX = XTWX + ridge * I
-                t_xtwx = self._toc_ms(t)
+                with self._time_block(timings, "XTWX"):
+                    XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, w2, Xint)
+                    if ridge and ridge > 0.0:
+                        I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
+                        XTWX = XTWX + ridge * I
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
-                t = self._tic()
-                XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, w2, Yc).reshape(
-                    num_ts_X, B, max_E_X + 1, num_ts_Y * max_E_Y
-                )
-                t_xtwy = self._toc_ms(t)
+                with self._time_block(timings, "XTWy"):
+                    XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, w2, Yc).reshape(
+                        num_ts_X, B, max_E_X + 1, num_ts_Y * max_E_Y
+                    )
 
-                t = self._tic()
-                Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)
-                t_chol = self._toc_ms(t)
-                t = self._tic()
-                beta  = torch.cholesky_solve(XTWy, Lchol)           # (nX, B, Ex1, nY*Ey)
-                t_solve = self._toc_ms(t)
+                with self._time_block(timings, "cholesky"):
+                    Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)
+                with self._time_block(timings, "solve"):
+                    beta  = torch.cholesky_solve(XTWy, Lchol)           # (nX, B, Ex1, nY*Ey)
 
-                t = self._tic()
-                Xq = X_sample_b.to(self.compute_dtype)              # (nX, B, Ex)
-                Xq = torch.cat(
-                    [torch.ones((num_ts_X, B, 1), device=self.device, dtype=self.compute_dtype), Xq],
-                    dim=2
-                )                                                   # (nX, B, Ex1)
-                t_query_design = self._toc_ms(t)
+                with self._time_block(timings, "query_design"):
+                    Xq = X_sample_b.to(self.compute_dtype)              # (nX, B, Ex)
+                    Xq = torch.cat(
+                        [torch.ones((num_ts_X, B, 1), device=self.device, dtype=self.compute_dtype), Xq],
+                        dim=2
+                    )                                                   # (nX, B, Ex1)
 
-                t = self._tic()
-                pred_flat = torch.matmul(Xq.unsqueeze(2), beta).squeeze(2)  # (nX, B, nY*Ey)
-                t_predict = self._toc_ms(t)
+                with self._time_block(timings, "predict"):
+                    pred_flat = torch.matmul(Xq.unsqueeze(2), beta).squeeze(2)  # (nX, B, nY*Ey)
 
-                t = self._tic()
-                A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
-                A_all[s0:s1] = A.to(self.dtype)
-                t_store = self._toc_ms(t)
+                with self._time_block(timings, "store"):
+                    A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
+                    A_all[s0:s1] = A.to(self.dtype)
 
-                self.logger.debug(
-                    "SMAP batch [%d:%d) timings: slice=%s local_weights=%s square=%s cast_xy=%s design=%s XTWX=%s XTWy=%s cholesky=%s solve=%s query_design=%s predict=%s store=%s total=%s",
-                    int(s0),
-                    int(s1),
-                    self._format_ms(t_slice),
-                    self._format_ms(t_weights),
-                    self._format_ms(t_square),
-                    self._format_ms(t_cast_xy),
-                    self._format_ms(t_design),
-                    self._format_ms(t_xtwx),
-                    self._format_ms(t_xtwy),
-                    self._format_ms(t_chol),
-                    self._format_ms(t_solve),
-                    self._format_ms(t_query_design),
-                    self._format_ms(t_predict),
-                    self._format_ms(t_store),
-                    self._format_ms(self._toc_ms(t_batch)),
-                )
+                if self._debug_enabled():
+                    timings["total"] = self._toc_ms(t_batch)
+                    self.logger.debug(
+                        "SMAP batch [%d:%d) timings: %s",
+                        int(s0),
+                        int(s1),
+                        self._timings_summary(
+                            timings,
+                            order=["slice", "local_weights", "square", "cast_xy", "design", "XTWX", "XTWy",
+                                   "cholesky", "solve", "query_design", "predict", "store", "total"],
+                        ),
+                    )
 
                 del w2, Xc, Yc, onesL, Xint, XTWX, XTWy, Lchol, beta, Xq, pred_flat, A
             except RuntimeError as e:
@@ -862,86 +844,64 @@ class PairwiseCCM:
     def __get_nbrs_indices_with_weights(
         self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad
     ):
-        t_total = self._tic()
+        timings = {}
         try:
-            t = self._tic()
-            dist = self._cdist(sample, lib)  # (num_ts_X, S_blk, L)
-            t_cdist = self._toc_ms(t)
+            with self._time_block(timings, "cdist"):
+                dist = self._cdist(sample, lib)  # (num_ts_X, S_blk, L)
         except RuntimeError as e:
             if self._is_oom(e):
                 self._hard_clear()
             raise
 
         if exclusion_rad is None:
-            t = self._tic()
-            near_dist, indices = torch.topk(dist, 1 + n_nbrs_max, largest=False)
-            indices   = indices[:, :, :n_nbrs_max]
-            near_dist = near_dist[:, :, :n_nbrs_max]
-            t_select = self._toc_ms(t)
+            with self._time_block(timings, "select"):
+                near_dist, indices = torch.topk(dist, 1 + n_nbrs_max, largest=False, sorted=False)
+                indices   = indices[:, :, :n_nbrs_max]
+                near_dist = near_dist[:, :, :n_nbrs_max]
         else:
-            k_cand = min(lib.shape[1], 1 + n_nbrs_max + 2 * exclusion_rad)
-            t = self._tic()
-            near_dist_all, indices_all = torch.topk(dist, k_cand, largest=False)
+            with self._time_block(timings, "select"):
+                allowed = (
+                    (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
+                    (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
+                )  # (S_blk, L)
+                dist = dist.masked_fill(~allowed.unsqueeze(0), float("inf"))
+                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
 
-            mask = ~(
-                (lib_idx[indices_all] <= (sample_idx[:, None] + exclusion_rad)) &
-                (lib_idx[indices_all] >= (sample_idx[:, None] - exclusion_rad))
-            )
+        with self._time_block(timings, "weights"):
+            weights, indices = self.__weights_from_dists(near_dist, indices, n_nbrs, n_nbrs_max)
 
-            selector = (mask.cumsum(dim=2) <= n_nbrs_max) & mask
-
-            indices   = indices_all[selector].view(dist.shape[0], dist.shape[1], n_nbrs_max)
-            near_dist = near_dist_all[selector].view(dist.shape[0], dist.shape[1], n_nbrs_max)
-            t_select = self._toc_ms(t)
-
-        t = self._tic()
-        weights, indices = self.__weights_from_dists(near_dist, indices, n_nbrs, n_nbrs_max)
-        t_weights = self._toc_ms(t)
-
-        self.logger.debug(
-            "Neighbor search timings: cdist=%s select=%s weights=%s total=%s",
-            self._format_ms(t_cdist),
-            self._format_ms(t_select),
-            self._format_ms(t_weights),
-            self._format_ms(self._toc_ms(t_total)),
-        )
+        if self._debug_enabled():
+            timings["total"] = sum(v for v in timings.values())
+            self.logger.debug("Neighbor search timings: %s", self._timings_summary(timings, ["cdist", "select", "weights", "total"]))
         return weights, indices
     
     def __weights_from_dists(self, near_dist, indices, n_nbrs, n_nbrs_max):
-        t_total = self._tic()
+        timings = {}
         eps = torch.finfo(near_dist.dtype).eps
-        t = self._tic()
-        d0 = torch.clamp(near_dist[:, :, :1], min=eps)
-        w  = torch.exp(-near_dist / d0)
-        w  = torch.where(torch.isfinite(near_dist), w, torch.zeros_like(w))
-        t_exp = self._toc_ms(t)
+        with self._time_block(timings, "exp"):
+            d0 = near_dist.min(dim=2, keepdim=True).values.clamp_min(eps)
+            w  = torch.exp(-near_dist / d0)
+            w  = torch.where(torch.isfinite(near_dist), w, torch.zeros_like(w))
 
-        t = self._tic()
-        keep = (torch.arange(n_nbrs_max, device=w.device).unsqueeze(0) < n_nbrs.unsqueeze(1))
-        w = w * keep[:, None, :].to(w.dtype)
-        t_mask = self._toc_ms(t)
+        with self._time_block(timings, "mask"):
+            keep = (torch.arange(n_nbrs_max, device=w.device).unsqueeze(0) < n_nbrs.unsqueeze(1))
+            w = w * keep[:, None, :].to(w.dtype)
 
-        t = self._tic()
-        sumw = w.sum(dim=2, keepdim=True)
-        zero = sumw <= eps
-        if zero.any():
-            raise RuntimeError(
-                "All neighbors excluded by `exclusion_window` for some queries. "
-                "Reduce `exclusion_window`, increase `library_size`, or ensure the "
-                "library contains valid neighbors."
-            )
+        with self._time_block(timings, "normalize"):
+            sumw = w.sum(dim=2, keepdim=True)
+            zero = sumw <= eps
+            if zero.any():
+                raise RuntimeError(
+                    "All neighbors excluded by `exclusion_window` for some queries. "
+                    "Reduce `exclusion_window`, increase `library_size`, or ensure the "
+                    "library contains valid neighbors."
+                )
+            w = w / sumw.clamp_min(eps)
+            out = w.to(self.dtype)
 
-        w = w / sumw.clamp_min(eps)
-        out = w.to(self.dtype)
-        t_norm = self._toc_ms(t)
-
-        self.logger.debug(
-            "Neighbor weight timings: exp=%s mask=%s normalize=%s total=%s",
-            self._format_ms(t_exp),
-            self._format_ms(t_mask),
-            self._format_ms(t_norm),
-            self._format_ms(self._toc_ms(t_total)),
-        )
+        if self._debug_enabled():
+            timings["total"] = sum(v for v in timings.values())
+            self.logger.debug("Neighbor weight timings: %s", self._timings_summary(timings, ["exp", "mask", "normalize", "total"]))
         return out, indices
 
 
@@ -1139,3 +1099,23 @@ class PairwiseCCM:
 
     def _format_ms(self, ms):
         return f"{ms:.3f}ms"
+
+    def _debug_enabled(self):
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    @contextmanager
+    def _time_block(self, timings: dict, key: str):
+        if not self._debug_enabled():
+            yield
+            return
+        t0 = self._tic()
+        try:
+            yield
+        finally:
+            timings[key] = self._toc_ms(t0)
+
+    def _timings_summary(self, timings: dict, order=None):
+        keys = order if order is not None else timings.keys()
+        return " ".join(
+            f"{k}={self._format_ms(timings[k])}" for k in keys if k in timings
+        )
