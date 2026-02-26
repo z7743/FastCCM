@@ -10,8 +10,8 @@ import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
-torch.set_num_threads(os.cpu_count())  
-torch.set_num_interop_threads(1)
+#torch.set_num_threads(os.cpu_count())  
+#torch.set_num_interop_threads(1)
 
 
 class _MicrosecondFormatter(logging.Formatter):
@@ -649,19 +649,17 @@ class PairwiseCCM:
                     self._hard_clear()
                 raise
 
-            with self._time_block(timings, "indexing"):
-                I = indices.reshape(num_ts_X, -1).T
+            I = indices
 
-            with self._time_block(timings, "weights_expand"):
-                weights_c = torch.permute(weights, (1, 2, 0))[:, :, None, None] \
-                                .expand(-1, -1, max_E_Y, num_ts_Y, -1).to(self.compute_dtype)
+            weights_c = weights.to(self.compute_dtype)
 
             with self._time_block(timings, "gather"):
-                Y_lib_shifted_indexed = torch.permute(Y_lib_shifted[:, I], (1, 3, 0, 2)).to(self.compute_dtype)
+                Y_idx = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2)[I]
+                Y_lib_shifted_indexed = Y_idx.reshape(num_ts_X, s1 - s0, nbrs_num_max, num_ts_Y, max_E_Y)
 
             with self._time_block(timings, "weighted_avg"):
-                A_blk = Y_lib_shifted_indexed.reshape(-1, nbrs_num_max, max_E_Y, num_ts_Y, num_ts_X)
-                A_blk = (A_blk * weights_c).sum(axis=1)  # (B, E_y, n_Y, n_X)
+                A_blk = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
+                A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
 
             with self._time_block(timings, "store"):
                 A[s0:s1] = A_blk.to(self.dtype)
@@ -674,11 +672,11 @@ class PairwiseCCM:
                     int(s1),
                     self._timings_summary(
                         timings,
-                        order=["neighbors", "indexing", "weights_expand", "gather", "weighted_avg", "store", "total"],
+                        order=["neighbors", "gather", "weighted_avg", "store", "total"],
                     ),
                 )
 
-            del weights, indices, I, weights_c, Y_lib_shifted_indexed, A_blk
+            del weights, indices, I, weights_c, Y_idx, Y_lib_shifted_indexed, A_blk
 
         if (Y_sample_shifted is None) and return_pred:
             return A
