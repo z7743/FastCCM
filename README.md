@@ -1,6 +1,26 @@
 # FastCCM
 PyTorch-based implementation of Convergent Cross Mapping (CCM) optimized for calculating pairwise CCM matrices.
 
+## Performance 
+
+Measured on **CPU, Apple M2 16GB**
+
+CCM matrix timings (E=5, exclusion window=5)
+
+| Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
+|---|---:|---:|
+| 100×100, T=1000 | 0.279 | 1.987 |
+| 200×200, T=1000 | 0.653 | 3.534 |
+| 100×100, T=5000 | 4.626 | 35.667 |
+
+Single time series timings (E=20, exclusion window=10)
+
+| Condition | Simplex projection (s) | S-MAP projection (s) |
+|---|---:|---:|
+| T=2000 | 0.012 | 0.168 |
+| T=8000 | 0.124 | 2.497 |
+| T=32000 | 1.808 | 55.478 |
+
 ## Installation
 
 **Requirements**: Python ≥ 3.9, pip.
