@@ -122,33 +122,103 @@ def get_metric(name: str) -> Metric:
     return _METRICS[name]
 
 
-def corr_state_init(Ey, nY, nX, *, device, dtype):
-    shape = (Ey, nY, nX)
-    z = torch.zeros(shape, device=device, dtype=dtype)
+def get_streaming_metric_kind(metric_fn) -> str | None:
+    name = getattr(metric_fn, "__name__", "")
     return {
-        "n": 0,
-        "sumA": z.clone(),
-        "sumB": z.clone(),
-        "sumAA": z.clone(),
-        "sumBB": z.clone(),
-        "sumAB": z.clone(),
-    }
+        "batch_corr": "corr",
+        "batch_mse": "mse",
+        "batch_rmse": "rmse",
+        "batch_mae": "mae",
+        "batch_neg_nrmse": "neg_nrmse",
+    }.get(name)
 
 
-def corr_state_update(state, A_blk, B_blk):
+def stream_metric_state_init(kind: str, D, Y, X, *, device, dtype):
+    shape_dyx = (D, Y, X)
+    z_dyx = torch.zeros(shape_dyx, device=device, dtype=dtype)
+    state = {"n": 0, "D": int(D), "dtype": dtype, "device": device}
+
+    if kind == "corr":
+        state.update({
+            "sumA": z_dyx.clone(),
+            "sumB": z_dyx.clone(),
+            "sumAA": z_dyx.clone(),
+            "sumBB": z_dyx.clone(),
+            "sumAB": z_dyx.clone(),
+        })
+        return state
+    if kind in ("mse", "rmse"):
+        state["sum_sq_err"] = z_dyx
+        return state
+    if kind == "mae":
+        state["sum_abs_err"] = z_dyx
+        return state
+    if kind == "neg_nrmse":
+        shape_yx = (Y, X)
+        z_yx = torch.zeros(shape_yx, device=device, dtype=dtype)
+        state.update({
+            "sum_sq_err_sd": z_yx.clone(),  # over S and D
+            "sumB_sd": z_yx.clone(),        # over S and D
+            "sumBB_sd": z_yx.clone(),       # over S and D
+        })
+        return state
+    raise ValueError(f"Unsupported streaming metric kind: {kind}")
+
+
+def stream_metric_state_update(kind: str, state, A_blk, B_blk):
     state["n"] += int(A_blk.shape[0])
-    state["sumA"] += A_blk.sum(dim=0)
-    state["sumB"] += B_blk.sum(dim=0)
-    state["sumAA"] += (A_blk * A_blk).sum(dim=0)
-    state["sumBB"] += (B_blk * B_blk).sum(dim=0)
-    state["sumAB"] += (A_blk * B_blk).sum(dim=0)
+
+    if kind == "corr":
+        state["sumA"] += A_blk.sum(dim=0)
+        state["sumB"] += B_blk.sum(dim=0)
+        state["sumAA"] += (A_blk * A_blk).sum(dim=0)
+        state["sumBB"] += (B_blk * B_blk).sum(dim=0)
+        state["sumAB"] += (A_blk * B_blk).sum(dim=0)
+        return
+    if kind in ("mse", "rmse"):
+        d = A_blk - B_blk
+        state["sum_sq_err"] += (d * d).sum(dim=0)
+        return
+    if kind == "mae":
+        state["sum_abs_err"] += (A_blk - B_blk).abs().sum(dim=0)
+        return
+    if kind == "neg_nrmse":
+        d = A_blk - B_blk
+        state["sum_sq_err_sd"] += (d * d).sum(dim=(0, 1))
+        state["sumB_sd"] += B_blk.sum(dim=(0, 1))
+        state["sumBB_sd"] += (B_blk * B_blk).sum(dim=(0, 1))
+        return
+    raise ValueError(f"Unsupported streaming metric kind: {kind}")
 
 
-def corr_state_finalize(state, eps=1e-12):
+def stream_metric_state_finalize(kind: str, state, *, eps=1e-12, neg_nrmse_T=0.5):
     n = max(int(state["n"]), 1)
-    n_t = torch.tensor(float(n), device=state["sumA"].device, dtype=state["sumA"].dtype)
-    num = state["sumAB"] - (state["sumA"] * state["sumB"] / n_t)
-    denA = state["sumAA"] - (state["sumA"] * state["sumA"] / n_t)
-    denB = state["sumBB"] - (state["sumB"] * state["sumB"] / n_t)
-    eps_t = torch.tensor(eps, device=state["sumA"].device, dtype=state["sumA"].dtype)
-    return num / torch.sqrt(denA * denB + eps_t)
+    D = max(int(state["D"]), 1)
+    device = state["device"]
+    dtype = state["dtype"]
+    n_t = torch.tensor(float(n), device=device, dtype=dtype)
+    eps_t = torch.tensor(eps, device=device, dtype=dtype)
+
+    if kind == "corr":
+        num = state["sumAB"] - (state["sumA"] * state["sumB"] / n_t)
+        denA = state["sumAA"] - (state["sumA"] * state["sumA"] / n_t)
+        denB = state["sumBB"] - (state["sumB"] * state["sumB"] / n_t)
+        return num / torch.sqrt(denA * denB + eps_t)
+    if kind == "mse":
+        return state["sum_sq_err"] / n_t
+    if kind == "rmse":
+        return torch.sqrt((state["sum_sq_err"] / n_t) + eps_t)
+    if kind == "mae":
+        return state["sum_abs_err"] / n_t
+    if kind == "neg_nrmse":
+        cnt_t = torch.tensor(float(n * D), device=device, dtype=dtype)
+        mse = state["sum_sq_err_sd"] / cnt_t
+        rmse = torch.sqrt(mse + eps_t)
+        muB = state["sumB_sd"] / cnt_t
+        varB = (state["sumBB_sd"] / cnt_t) - (muB * muB)
+        rmse_base = torch.sqrt(varB.clamp_min(0.0) + eps_t)
+        T_t = torch.tensor(neg_nrmse_T, device=device, dtype=dtype)
+        out = torch.exp(-((1.0 / T_t) * torch.pow(rmse / (rmse_base + eps_t), 2)))
+        return out.unsqueeze(0).to(dtype=dtype)
+    raise ValueError(f"Unsupported streaming metric kind: {kind}")
+

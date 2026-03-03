@@ -2,7 +2,13 @@
 import warnings
 import os
 import torch
-from .utils.metrics import get_metric, corr_state_init, corr_state_update, corr_state_finalize
+from .utils.metrics import (
+    get_metric,
+    get_streaming_metric_kind,
+    stream_metric_state_init,
+    stream_metric_state_update,
+    stream_metric_state_finalize,
+)
 from .utils.runtime import (
     is_oom_error,
     soft_clear,
@@ -607,15 +613,17 @@ class PairwiseCCM:
             int(math.ceil(subsample_size / sample_batch_size)),
             str(exclusion_rad),
         )
-        stream_corr = (not return_pred) and (getattr(metric_fn, "__name__", "") == "batch_corr")
-        corr_state = None
-        if stream_corr:
-            corr_state = corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
+        stream_kind = get_streaming_metric_kind(metric_fn) if (not return_pred) else None
+        stream_state = None
+        if stream_kind is not None:
+            stream_state = stream_metric_state_init(
+                stream_kind, max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype
+            )
 
         # Keep full output off accelerator in score mode so device memory tracks batch size.
         out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
-        A = None if stream_corr else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
+        A = None if stream_kind is not None else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "simplex batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             self.logger.debug(
@@ -652,11 +660,12 @@ class PairwiseCCM:
                 A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
 
             with time_block(self.logger, self.device, timings, "store"):
-                if stream_corr:
+                if stream_kind is not None:
                     B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
                         .expand(s1 - s0, max_E_Y, num_ts_Y, num_ts_X)
-                    corr_state_update(
-                        corr_state,
+                    stream_metric_state_update(
+                        stream_kind,
+                        stream_state,
                         A_blk.to(device="cpu", dtype=self.compute_dtype),
                         B_blk,
                     )
@@ -678,8 +687,8 @@ class PairwiseCCM:
 
             del weights, indices, I, weights_c, Y_idx, Y_lib_shifted_indexed, A_blk
 
-        if stream_corr:
-            return corr_state_finalize(corr_state)
+        if stream_kind is not None:
+            return stream_metric_state_finalize(stream_kind, stream_state)
 
         if (Y_sample_shifted is None) and return_pred:
             return A
@@ -705,14 +714,16 @@ class PairwiseCCM:
         max_E_Y  = Y_lib_shifted.shape[2]
         subsample_size = X_sample.shape[1]
         subset_size    = X_lib.shape[1]
-        stream_corr = (not return_pred) and (getattr(metric_fn, "__name__", "") == "batch_corr")
-        corr_state = None
-        if stream_corr:
-            corr_state = corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
+        stream_kind = get_streaming_metric_kind(metric_fn) if (not return_pred) else None
+        stream_state = None
+        if stream_kind is not None:
+            stream_state = stream_metric_state_init(
+                stream_kind, max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype
+            )
 
         # Keep full output off accelerator in score mode so device memory tracks batch size.
         out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
-        A_all = None if stream_corr else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
+        A_all = None if stream_kind is not None else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
 
         if sample_batch_size is None or sample_batch_size >= subsample_size:
             sample_batch_size = subsample_size
@@ -794,11 +805,12 @@ class PairwiseCCM:
 
                 with time_block(self.logger, self.device, timings, "store"):
                     A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
-                    if stream_corr:
+                    if stream_kind is not None:
                         B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
                             .expand(B, max_E_Y, num_ts_Y, num_ts_X)
-                        corr_state_update(
-                            corr_state,
+                        stream_metric_state_update(
+                            stream_kind,
+                            stream_state,
                             A.to(device="cpu", dtype=self.compute_dtype),
                             B_blk,
                         )
@@ -826,8 +838,8 @@ class PairwiseCCM:
                     hard_clear(self.logger, self.device)
                 raise
 
-        if stream_corr:
-            return corr_state_finalize(corr_state)
+        if stream_kind is not None:
+            return stream_metric_state_finalize(stream_kind, stream_state)
 
         if (Y_sample_shifted is None) and return_pred:
             return A_all
