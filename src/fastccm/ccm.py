@@ -506,6 +506,18 @@ class PairwiseCCM:
                 int(library_size_res), library_size_mode, str(library_size),
                 int(min_len_pred), int(min_len_lib), int(tp)
             )
+            pred_shape = (int(min_len_pred), int(max_E_Y), int(num_ts_Y), int(num_ts_X))
+            pred_bytes = int(
+                pred_shape[0] * pred_shape[1] * pred_shape[2] * pred_shape[3]
+                * torch.tensor([], dtype=self.dtype).element_size()
+            )
+            self.logger.warning(
+                "Predict final tensor allocation shape=%s dtype=%s approx=%s on device=%s (before CPU/NumPy transfer).",
+                str(pred_shape),
+                str(self.dtype),
+                self._format_bytes(pred_bytes),
+                str(self.device),
+            )
 
         # ---------- 4) indices ----------
         gen_lib = gen_smpl = None
