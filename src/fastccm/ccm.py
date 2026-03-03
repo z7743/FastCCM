@@ -14,8 +14,8 @@ try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
     tqdm = None
-#torch.set_num_threads(os.cpu_count())  
-#torch.set_num_interop_threads(1)
+torch.set_num_threads(os.cpu_count())  
+torch.set_num_interop_threads(1)
 
 
 class _MicrosecondFormatter(logging.Formatter):
@@ -631,8 +631,15 @@ class PairwiseCCM:
             int(math.ceil(subsample_size / sample_batch_size)),
             str(exclusion_rad),
         )
+        stream_corr = (not return_pred) and (getattr(metric_fn, "__name__", "") == "batch_corr")
+        corr_state = None
+        if stream_corr:
+            corr_state = self._corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
+
+        # Keep full output off accelerator in score mode so device memory tracks batch size.
+        out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
-        A = torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=self.device, dtype=self.dtype)
+        A = None if stream_corr else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
         for s0 in self._batch_starts(subsample_size, sample_batch_size, "simplex batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             self.logger.debug(
@@ -644,8 +651,9 @@ class PairwiseCCM:
 
             try:
                 with self._time_block(timings, "neighbors"):
+                    X_sample_b = X_sample[:, s0:s1, :].to(device=self.device, dtype=self.dtype, copy=False)
                     weights, indices = self.__get_nbrs_indices_with_weights(
-                        X_lib, X_sample[:, s0:s1, :],
+                        X_lib, X_sample_b,
                         nbrs_num, nbrs_num_max, lib_indices, smpl_indices[s0:s1],
                         exclusion_rad
                     )
@@ -668,7 +676,17 @@ class PairwiseCCM:
                 A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
 
             with self._time_block(timings, "store"):
-                A[s0:s1] = A_blk.to(self.dtype)
+                if stream_corr:
+                    B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
+                        .expand(s1 - s0, max_E_Y, num_ts_Y, num_ts_X)
+                    self._corr_state_update(
+                        corr_state,
+                        A_blk.to(device="cpu", dtype=self.compute_dtype),
+                        B_blk,
+                    )
+                    del B_blk
+                else:
+                    A[s0:s1] = A_blk.to(out_device, dtype=self.dtype)
 
             if self._debug_enabled():
                 timings["total"] = self._toc_ms(t_batch)
@@ -684,14 +702,17 @@ class PairwiseCCM:
 
             del weights, indices, I, weights_c, Y_idx, Y_lib_shifted_indexed, A_blk
 
+        if stream_corr:
+            return self._corr_state_finalize(corr_state)
+
         if (Y_sample_shifted is None) and return_pred:
             return A
 
         self.logger.debug("Computing simplex score metric")
-        B = torch.permute(Y_sample_shifted, (1, 2, 0)).to(self.compute_dtype)[:, :, :, None] \
+        B = torch.permute(Y_sample_shifted, (1, 2, 0)).to(device=A.device, dtype=self.compute_dtype)[:, :, :, None] \
             .expand(Y_sample_shifted.shape[1], max_E_Y, num_ts_Y, num_ts_X)
 
-        r_AB = metric_fn(A.to(self.compute_dtype), B)
+        r_AB = metric_fn(A.to(dtype=self.compute_dtype), B)
 
         if return_pred:
             return (r_AB, A)
@@ -708,8 +729,14 @@ class PairwiseCCM:
         max_E_Y  = Y_lib_shifted.shape[2]
         subsample_size = X_sample.shape[1]
         subset_size    = X_lib.shape[1]
+        stream_corr = (not return_pred) and (getattr(metric_fn, "__name__", "") == "batch_corr")
+        corr_state = None
+        if stream_corr:
+            corr_state = self._corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
 
-        A_all = torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=self.device, dtype=self.dtype)
+        # Keep full output off accelerator in score mode so device memory tracks batch size.
+        out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
+        A_all = None if stream_corr else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
 
         if sample_batch_size is None or sample_batch_size >= subsample_size:
             sample_batch_size = subsample_size
@@ -740,7 +767,7 @@ class PairwiseCCM:
 
             # Slice the queries 
             with self._time_block(timings, "slice"):
-                X_sample_b = X_sample[:, s0:s1, :]  # (num_ts_X, B, max_E_X)
+                X_sample_b = X_sample[:, s0:s1, :].to(device=self.device, dtype=self.dtype, copy=False)  # (num_ts_X, B, max_E_X)
 
             try:
                 with self._time_block(timings, "local_weights"):
@@ -791,7 +818,17 @@ class PairwiseCCM:
 
                 with self._time_block(timings, "store"):
                     A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
-                    A_all[s0:s1] = A.to(self.dtype)
+                    if stream_corr:
+                        B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
+                            .expand(B, max_E_Y, num_ts_Y, num_ts_X)
+                        self._corr_state_update(
+                            corr_state,
+                            A.to(device="cpu", dtype=self.compute_dtype),
+                            B_blk,
+                        )
+                        del B_blk
+                    else:
+                        A_all[s0:s1] = A.to(out_device, dtype=self.dtype)
 
                 if self._debug_enabled():
                     timings["total"] = self._toc_ms(t_batch)
@@ -813,17 +850,51 @@ class PairwiseCCM:
                     self._hard_clear()
                 raise
 
+        if stream_corr:
+            return self._corr_state_finalize(corr_state)
+
         if (Y_sample_shifted is None) and return_pred:
             return A_all
 
         self.logger.debug("Computing SMAP score metric")
-        B_full = torch.permute(Y_sample_shifted, (1, 2, 0)).unsqueeze(-1).expand(subsample_size, max_E_Y, num_ts_Y, num_ts_X).to(self.compute_dtype)
-        r_AB = metric_fn(A_all.to(self.compute_dtype), B_full)
+        B_full = torch.permute(Y_sample_shifted, (1, 2, 0)).unsqueeze(-1).expand(
+            subsample_size, max_E_Y, num_ts_Y, num_ts_X
+        ).to(device=A_all.device, dtype=self.compute_dtype)
+        r_AB = metric_fn(A_all.to(dtype=self.compute_dtype), B_full)
 
         if return_pred:
             return (r_AB, A_all)
         else:
             return r_AB
+
+    def _corr_state_init(self, Ey, nY, nX, *, device, dtype):
+        shape = (Ey, nY, nX)
+        z = torch.zeros(shape, device=device, dtype=dtype)
+        return {
+            "n": 0,
+            "sumA": z.clone(),
+            "sumB": z.clone(),
+            "sumAA": z.clone(),
+            "sumBB": z.clone(),
+            "sumAB": z.clone(),
+        }
+
+    def _corr_state_update(self, state, A_blk, B_blk):
+        state["n"] += int(A_blk.shape[0])
+        state["sumA"] += A_blk.sum(dim=0)
+        state["sumB"] += B_blk.sum(dim=0)
+        state["sumAA"] += (A_blk * A_blk).sum(dim=0)
+        state["sumBB"] += (B_blk * B_blk).sum(dim=0)
+        state["sumAB"] += (A_blk * B_blk).sum(dim=0)
+
+    def _corr_state_finalize(self, state, eps=1e-12):
+        n = max(int(state["n"]), 1)
+        n_t = torch.tensor(float(n), device=state["sumA"].device, dtype=state["sumA"].dtype)
+        num = state["sumAB"] - (state["sumA"] * state["sumB"] / n_t)
+        denA = state["sumAA"] - (state["sumA"] * state["sumA"] / n_t)
+        denB = state["sumBB"] - (state["sumB"] * state["sumB"] / n_t)
+        eps_t = torch.tensor(eps, device=state["sumA"].device, dtype=state["sumA"].dtype)
+        return num / torch.sqrt(denA * denB + eps_t)
         
 
     def __get_random_indices(self, num_points, sample_len, generator=None):
