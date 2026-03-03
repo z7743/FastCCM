@@ -10,6 +10,10 @@ import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
 #torch.set_num_threads(os.cpu_count())  
 #torch.set_num_interop_threads(1)
 
@@ -200,7 +204,7 @@ class PairwiseCCM:
             Scoring applied to (prediction, target).
         batch_size : int or {"auto", None}, default "auto"
             Number of query points processed per chunk. If "auto", a heuristic estimates
-            a safe chunk size targeting ~8 GB peak usage with some headroom. If None,
+            a safe chunk size targeting ~2 GB peak usage with some headroom. If None,
             processes all at once (may be memory heavy).
         clean_after : bool, default False
             If True, run a cleanup after returning (calls Python GC and clears
@@ -316,7 +320,7 @@ class PairwiseCCM:
             Scoring applied to (prediction, target).
         batch_size : int or {"auto", None}, default "auto"
             Number of query points processed per chunk. If "auto", a heuristic estimates
-            a safe chunk size targeting ~8 GB peak usage with some headroom. If None,
+            a safe chunk size targeting ~2 GB peak usage with some headroom. If None,
             processes all at once (may be memory heavy).
         clean_after : bool, default False
             If True, run a cleanup after returning (calls Python GC and clears
@@ -404,7 +408,6 @@ class PairwiseCCM:
             "__ccm_core(mode=%s, method=%s, library_size=%s, sample_size=%s, exclusion_window=%s, batch_size=%s)",
             mode, method, library_size, sample_size, exclusion_window, batch_size
         )
-        self.logger.debug("Core step 1/6: resolving dimensions and aligned lengths")
         # ---------- 1) dims / lengths ----------
         num_ts_X = len(X_lib_list)
         num_ts_Y = len(Y_lib_list)
@@ -416,6 +419,10 @@ class PairwiseCCM:
             min_len = min(
                 min(y.shape[0] for y in Y_lib_list),
                 min(x.shape[0] for x in X_lib_list)
+            )
+            self.logger.info(
+                "Embedding common_len=%d max_dim=%d",
+                int(min_len), int(max(max_E_X, max_E_Y))
             )
             if min_len - tp <= 0:
                 raise ValueError("Not enough points after applying tp.")
@@ -433,11 +440,14 @@ class PairwiseCCM:
                 min(x.shape[0] for x in X_lib_list)
             )
             min_len_pred = min(x.shape[0] for x in X_sample_list)
+            self.logger.info(
+                "Embedding common_lib_len=%d common_pred_len=%d max_dim=%d",
+                int(min_len_lib), int(min_len_pred), int(max(max_E_X, max_E_Y))
+            )
 
             if min_len_lib - tp <= 0 or min_len_pred <= 0:
                 raise ValueError("Not enough points for library or prediction.")
 
-        self.logger.debug("Core step 2/6: parsing method-specific parameters")
         # ---------- 2) method params ----------
         if method == "simplex":
             if "nbrs_num" in kwargs:
@@ -452,7 +462,6 @@ class PairwiseCCM:
         else:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
-        self.logger.debug("Core step 3/6: resolving effective library/sample sizes")
         # ---------- 3) size resolution ----------
         if mode == "score":
             # Defaults/auto computed from min_len (not min_len - tp)
@@ -477,10 +486,10 @@ class PairwiseCCM:
                 sample_size_res = int(sample_size)
 
             self.logger.info(
-                "resolved sizes[score] library_size=%d (%s, input=%s) sample_size=%d (%s, input=%s) base_min_len=%d tp=%d",
+                "library_size=%d (%s, input=%s) sample_size=%d (%s, input=%s) tp=%d",
                 int(library_size_res), library_size_mode, str(library_size),
                 int(sample_size_res), sample_size_mode, str(sample_size),
-                int(min_len), int(tp)
+                int(tp)
             )
         else:  # predict
             library_size_mode = "explicit"
@@ -493,12 +502,11 @@ class PairwiseCCM:
             else:
                 library_size_res = int(library_size)
             self.logger.info(
-                "resolved sizes[predict] library_size=%d (%s, input=%s) sample_size=%d (predict-uses-all-queries) base_min_len_lib=%d tp=%d",
+                "library_size=%d (%s, input=%s) sample_size=%d (predict-uses-all-queries) tp=%d",
                 int(library_size_res), library_size_mode, str(library_size),
                 int(min_len_pred), int(min_len_lib), int(tp)
             )
 
-        self.logger.debug("Core step 4/6: generating library/sample indices")
         # ---------- 4) indices ----------
         gen_lib = gen_smpl = None
         if seed is not None:
@@ -514,7 +522,6 @@ class PairwiseCCM:
             lib_indices  = self.__get_random_indices(min_len_lib - tp, library_size_res, gen_lib)
             smpl_indices = torch.arange(min_len_pred, device=self.device)  # same as original
 
-        self.logger.debug("Core step 5/6: materializing sampled tensors")
         # ---------- 5) sampling ----------
         if mode == "score":
             X_lib    = self.__get_random_sample(X_lib_list, min_len, lib_indices,  num_ts_X, max_E_X)
@@ -527,7 +534,6 @@ class PairwiseCCM:
             Y_lib_s  = self.__get_random_sample(Y_lib_list,   min_len_lib,  lib_indices + tp, num_ts_Y, max_E_Y)
             Y_smp_s  = None
 
-        self.logger.debug("Core step 6/6: running prediction backend (%s)", method)
         # ---------- 6) method call ----------
         if method == "simplex":
             auto_batch = (batch_size == "auto")
@@ -535,16 +541,16 @@ class PairwiseCCM:
             total_samples = int(X_sample.shape[1])
             if auto_batch:
                 batch_size, batch_auto_meta = self.__auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=8.0
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=2.0
                 )
             else:
                 _, batch_auto_meta = self.__auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=8.0
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=2.0
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
             self.logger.info(
-                "batching[simplex] policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
+                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
                 "auto" if auto_batch else ("all-at-once" if batch_size is None else "manual"),
                 total_samples,
                 total_samples if batch_size is None else int(batch_size),
@@ -568,13 +574,13 @@ class PairwiseCCM:
             auto_batch = (batch_size == "auto")
             total_samples = int(X_sample.shape[1])
             if auto_batch:
-                batch_size, batch_auto_meta = self.__auto_batch_size_smap(X_lib, X_sample, Y_lib_s, budget_gb=8.0)
+                batch_size, batch_auto_meta = self.__auto_batch_size_smap(X_lib, X_sample, Y_lib_s, budget_gb=2.0)
             else:
-                _, batch_auto_meta = self.__auto_batch_size_smap(X_lib, X_sample, Y_lib_s, budget_gb=8.0)
+                _, batch_auto_meta = self.__auto_batch_size_smap(X_lib, X_sample, Y_lib_s, budget_gb=2.0)
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
             self.logger.info(
-                "batching[smap] policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
+                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
                 "auto" if auto_batch else ("all-at-once" if batch_size is None else "manual"),
                 total_samples,
                 total_samples if batch_size is None else int(batch_size),
@@ -627,7 +633,7 @@ class PairwiseCCM:
         )
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
         A = torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=self.device, dtype=self.dtype)
-        for s0 in range(0, subsample_size, sample_batch_size):
+        for s0 in self._batch_starts(subsample_size, sample_batch_size, "simplex batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             self.logger.debug(
                 "Simplex batch [%d:%d) started (batch_queries=%d)",
@@ -722,7 +728,7 @@ class PairwiseCCM:
             str(theta),
             str(ridge),
         )
-        for s0 in range(0, subsample_size, sample_batch_size):
+        for s0 in self._batch_starts(subsample_size, sample_batch_size, "smap batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             B  = s1 - s0
             self.logger.debug(
@@ -962,7 +968,7 @@ class PairwiseCCM:
                 pass
         self.logger.warning("Hard memory cleanup finished")
 
-    def __auto_batch_size_smap(self, X_lib, X_sample, Y_lib_s, budget_gb=8.0):
+    def __auto_batch_size_smap(self, X_lib, X_sample, Y_lib_s, budget_gb=2.0):
 
         num_ts_X, L, max_E_X = X_lib.shape
         num_ts_Y, _, max_E_Y = Y_lib_s.shape
@@ -1018,7 +1024,7 @@ class PairwiseCCM:
             "estimated_peak_bytes": int(B * per_sample_bytes),
         }
     
-    def __auto_batch_size_simplex(self, X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=8.0):
+    def __auto_batch_size_simplex(self, X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=2.0):
         """
         Estimate samples chunk size B for simplex using actual tensors.
         Conservative: counts cdist, KNN book-keeping, your 5D weights_c & gathered Y,
@@ -1116,4 +1122,19 @@ class PairwiseCCM:
         keys = order if order is not None else timings.keys()
         return " ".join(
             f"{k}={self._format_ms(timings[k])}" for k in keys if k in timings
+        )
+
+    def _batch_starts(self, total_samples, sample_batch_size, desc):
+        starts = range(0, total_samples, sample_batch_size)
+        if not self.logger.isEnabledFor(logging.INFO):
+            return starts
+        if tqdm is None:
+            return starts
+        return tqdm(
+            starts,
+            total=int(math.ceil(total_samples / sample_batch_size)),
+            desc=desc,
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
         )
