@@ -10,14 +10,19 @@ import os
 
 
 class Functions:
-    def __init__(self, device="cpu",dtype="float32", compute_dtype="float32"):
+    def __init__(self, device="cpu",dtype="float32", compute_dtype="float32", memory_budget_gb=2.0):
         """
         Initializes the CCMFunction with a PairwiseCCM instance.
 
         Parameters:
             device (str): The computation device ('cpu' or 'cuda') to use for all calculations.
         """
-        self.ccm = PairwiseCCM(device=device, dtype=dtype, compute_dtype=compute_dtype)
+        self.ccm = PairwiseCCM(
+            device=device,
+            dtype=dtype,
+            compute_dtype=compute_dtype,
+            memory_budget_gb=memory_budget_gb,
+        )
 
     def _make_out_array(self, shape, dtype=np.float32, out_path=None, fill_value=np.nan, order="C"):
         """

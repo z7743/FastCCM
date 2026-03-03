@@ -65,8 +65,8 @@ class PairwiseCCM:
       float32 to maintain numerical stability.
     """
 
-    def __init__(self,device = "cpu", dtype="float32", compute_dtype=None, 
-                 verbose = 0, log_file = None, ):
+    def __init__(self,device = "cpu", dtype="float32", compute_dtype=None,
+                 verbose = 0, log_file = None, memory_budget_gb=2.0):
         """
         Create a PairwiseCCM instance.
 
@@ -82,14 +82,20 @@ class PairwiseCCM:
         compute_dtype : torch.dtype or str or None, default None
             Math-ops dtype used for heavy linear algebra (e.g., distances, solves).
             If None, uses the same value as `dtype`. 
+        memory_budget_gb : float, default 2.0
+            Memory budget (GB) used by automatic batching (`batch_size="auto"`).
+            Larger values increase batch size and speed, but use more memory.
         """
         self.device = device
         self.dtype = _resolve_dtype(dtype) or torch.float32
         self.compute_dtype = _resolve_dtype(compute_dtype) or self.dtype
+        self.memory_budget_gb = float(memory_budget_gb)
 
         # (Optional) sanity: ensure float type
         if not (self.dtype.is_floating_point and self.compute_dtype.is_floating_point):
             raise ValueError("dtype and compute_dtype must be floating dtypes.")
+        if self.memory_budget_gb <= 0:
+            raise ValueError("memory_budget_gb must be positive.")
         
         self.logger = setup_logger(__name__, verbose=verbose, log_file=log_file)
 
@@ -170,7 +176,8 @@ class PairwiseCCM:
             Scoring applied to (prediction, target).
         batch_size : int or {"auto", None}, default "auto"
             Number of query points processed per chunk. If "auto", a heuristic estimates
-            a safe chunk size targeting ~2 GB peak usage with some headroom. If None,
+            a safe chunk size using `memory_budget_gb` from the class constructor.
+            If None,
             processes all at once (may be memory heavy).
         clean_after : bool, default False
             If True, run a cleanup after returning (calls Python GC and clears
@@ -286,7 +293,8 @@ class PairwiseCCM:
             Scoring applied to (prediction, target).
         batch_size : int or {"auto", None}, default "auto"
             Number of query points processed per chunk. If "auto", a heuristic estimates
-            a safe chunk size targeting ~2 GB peak usage with some headroom. If None,
+            a safe chunk size using `memory_budget_gb` from the class constructor.
+            If None,
             processes all at once (may be memory heavy).
         clean_after : bool, default False
             If True, run a cleanup after returning (calls Python GC and clears
@@ -519,11 +527,11 @@ class PairwiseCCM:
             total_samples = int(X_sample.shape[1])
             if auto_batch:
                 batch_size, batch_auto_meta = auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
                 )
             else:
                 _, batch_auto_meta = auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
@@ -553,11 +561,11 @@ class PairwiseCCM:
             total_samples = int(X_sample.shape[1])
             if auto_batch:
                 batch_size, batch_auto_meta = auto_batch_size_smap(
-                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
+                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
                 )
             else:
                 _, batch_auto_meta = auto_batch_size_smap(
-                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
+                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
