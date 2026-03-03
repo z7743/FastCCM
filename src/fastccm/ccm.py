@@ -659,8 +659,8 @@ class PairwiseCCM:
                 A_blk = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
                 A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
 
-            with time_block(self.logger, self.device, timings, "store"):
-                if stream_kind is not None:
+            if stream_kind is not None:
+                with time_block(self.logger, self.device, timings, "metric"):
                     B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
                         .expand(s1 - s0, max_E_Y, num_ts_Y, num_ts_X)
                     stream_metric_state_update(
@@ -670,7 +670,8 @@ class PairwiseCCM:
                         B_blk,
                     )
                     del B_blk
-                else:
+            else:
+                with time_block(self.logger, self.device, timings, "store"):
                     A[s0:s1] = A_blk.to(out_device, dtype=self.dtype)
 
             if self._debug_enabled():
@@ -681,7 +682,7 @@ class PairwiseCCM:
                     int(s1),
                     timings_summary(
                         timings,
-                        order=["neighbors", "gather", "weighted_avg", "store", "total"],
+                        order=["neighbors", "gather", "weighted_avg", "metric", "store", "total"],
                     ),
                 )
 
@@ -803,9 +804,9 @@ class PairwiseCCM:
                 with time_block(self.logger, self.device, timings, "predict"):
                     pred_flat = torch.matmul(Xq.unsqueeze(2), beta).squeeze(2)  # (nX, B, nY*Ey)
 
-                with time_block(self.logger, self.device, timings, "store"):
-                    A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
-                    if stream_kind is not None:
+                A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
+                if stream_kind is not None:
+                    with time_block(self.logger, self.device, timings, "metric"):
                         B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
                             .expand(B, max_E_Y, num_ts_Y, num_ts_X)
                         stream_metric_state_update(
@@ -815,7 +816,8 @@ class PairwiseCCM:
                             B_blk,
                         )
                         del B_blk
-                    else:
+                else:
+                    with time_block(self.logger, self.device, timings, "store"):
                         A_all[s0:s1] = A.to(out_device, dtype=self.dtype)
 
                 if self._debug_enabled():
@@ -827,7 +829,7 @@ class PairwiseCCM:
                         timings_summary(
                             timings,
                             order=["slice", "local_weights", "square", "cast_xy", "design", "XTWX", "XTWy",
-                                   "cholesky", "solve", "query_design", "predict", "store", "total"],
+                                   "cholesky", "solve", "query_design", "predict", "metric", "store", "total"],
                         ),
                     )
 

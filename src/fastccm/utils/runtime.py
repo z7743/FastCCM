@@ -1,6 +1,7 @@
 import gc
 import logging
 import math
+import sys
 import time
 from contextlib import contextmanager
 
@@ -191,6 +192,7 @@ def batch_starts(logger: logging.Logger, total_samples, sample_batch_size, desc)
         total=int(math.ceil(total_samples / sample_batch_size)),
         desc=desc,
         unit="batch",
+        file=sys.stdout,
         leave=False,
         dynamic_ncols=True,
     )
