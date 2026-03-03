@@ -1,66 +1,26 @@
 # ccm.py
-import gc
 import warnings
 import os
 import torch
-from .utils.metrics import get_metric
+from .utils.metrics import get_metric, corr_state_init, corr_state_update, corr_state_finalize
+from .utils.runtime import (
+    is_oom_error,
+    soft_clear,
+    hard_clear,
+    format_bytes,
+    tic,
+    toc_ms,
+    time_block,
+    timings_summary,
+    auto_batch_size_smap,
+    auto_batch_size_simplex,
+    batch_starts,
+)
+from .utils.logger import setup_logger
 import math
 import logging
-import sys
-import time
-from contextlib import contextmanager
-from datetime import datetime
-try:
-    from tqdm.auto import tqdm
-except Exception:  # pragma: no cover
-    tqdm = None
 torch.set_num_threads(os.cpu_count())  
 torch.set_num_interop_threads(1)
-
-
-class _MicrosecondFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created)
-        if datefmt:
-            return dt.strftime(datefmt)
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-
-def _setup_logger(name: str, verbose: int = 0, log_file: str | None = None) -> logging.Logger:
-    """
-    verbose:
-      0 -> WARNING
-      1 -> INFO
-      2+-> DEBUG
-
-    If log_file is None -> log to terminal (stderr).
-    Else -> log to file.
-    """
-    logger = logging.getLogger(name)
-
-    level = logging.WARNING if verbose <= 0 else (logging.INFO if verbose == 1 else logging.DEBUG)
-    logger.setLevel(level)
-
-    # Avoid duplicate handlers across multiple PairwiseCCM instances
-    if not getattr(logger, "_pairwiseccm_configured", False):
-        logger.propagate = False
-
-        fmt = _MicrosecondFormatter(
-            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S.%f",
-        )
-
-        handler = logging.StreamHandler(sys.stderr) if log_file is None else logging.FileHandler(log_file)
-        handler.setLevel(level)
-        handler.setFormatter(fmt)
-        logger.addHandler(handler)
-
-        logger._pairwiseccm_configured = True
-    else:
-        # Update handler levels when verbose changes
-        for h in logger.handlers:
-            h.setLevel(level)
-
-    return logger
 
 def _resolve_dtype(x):
     if isinstance(x, torch.dtype):
@@ -125,7 +85,7 @@ class PairwiseCCM:
         if not (self.dtype.is_floating_point and self.compute_dtype.is_floating_point):
             raise ValueError("dtype and compute_dtype must be floating dtypes.")
         
-        self.logger = _setup_logger(__name__, verbose=verbose, log_file=log_file)
+        self.logger = setup_logger(__name__, verbose=verbose, log_file=log_file)
 
     def compute(self, *args, **kwargs):
         """
@@ -264,7 +224,7 @@ class PairwiseCCM:
         r_AB = r_AB.to("cpu").numpy()
         self.logger.info("score_matrix completed with output shape %s", r_AB.shape)
         if clean_after:
-            self._soft_clear()
+            soft_clear(self.logger, self.device)
         return r_AB
 
     def predict_matrix(
@@ -383,7 +343,7 @@ class PairwiseCCM:
         A = A.to("cpu").numpy()
         self.logger.info("predict_matrix completed with output shape %s", A.shape)
         if clean_after:
-            self._soft_clear()
+            soft_clear(self.logger, self.device)
         return A
 
     @torch.inference_mode()
@@ -515,7 +475,7 @@ class PairwiseCCM:
                 "Predict final tensor allocation shape=%s dtype=%s approx=%s on device=%s (before CPU/NumPy transfer).",
                 str(pred_shape),
                 str(self.dtype),
-                self._format_bytes(pred_bytes),
+                format_bytes(pred_bytes),
                 str(self.device),
             )
 
@@ -552,12 +512,12 @@ class PairwiseCCM:
             nbrs_num_max = nbrs_num.max().item()
             total_samples = int(X_sample.shape[1])
             if auto_batch:
-                batch_size, batch_auto_meta = self.__auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=2.0
+                batch_size, batch_auto_meta = auto_batch_size_simplex(
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
                 )
             else:
-                _, batch_auto_meta = self.__auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=2.0
+                _, batch_auto_meta = auto_batch_size_simplex(
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
@@ -568,9 +528,9 @@ class PairwiseCCM:
                 total_samples if batch_size is None else int(batch_size),
                 max(1, int(math.ceil(total_samples / max(total_samples if batch_size is None else int(batch_size), 1)))),
                 str((total_samples if batch_size is None else int(batch_size)) < total_samples),
-                self._format_bytes(batch_auto_meta["per_sample_bytes"]),
-                self._format_bytes(batch_auto_meta["budget_bytes"]),
-                self._format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
+                format_bytes(batch_auto_meta["per_sample_bytes"]),
+                format_bytes(batch_auto_meta["budget_bytes"]),
+                format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
             )
 
             out = self.__simplex_prediction(
@@ -586,9 +546,13 @@ class PairwiseCCM:
             auto_batch = (batch_size == "auto")
             total_samples = int(X_sample.shape[1])
             if auto_batch:
-                batch_size, batch_auto_meta = self.__auto_batch_size_smap(X_lib, X_sample, Y_lib_s, budget_gb=2.0)
+                batch_size, batch_auto_meta = auto_batch_size_smap(
+                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
+                )
             else:
-                _, batch_auto_meta = self.__auto_batch_size_smap(X_lib, X_sample, Y_lib_s, budget_gb=2.0)
+                _, batch_auto_meta = auto_batch_size_smap(
+                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=2.0
+                )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
             self.logger.info(
@@ -598,9 +562,9 @@ class PairwiseCCM:
                 total_samples if batch_size is None else int(batch_size),
                 max(1, int(math.ceil(total_samples / max(total_samples if batch_size is None else int(batch_size), 1)))),
                 str((total_samples if batch_size is None else int(batch_size)) < total_samples),
-                self._format_bytes(batch_auto_meta["per_sample_bytes"]),
-                self._format_bytes(batch_auto_meta["budget_bytes"]),
-                self._format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
+                format_bytes(batch_auto_meta["per_sample_bytes"]),
+                format_bytes(batch_auto_meta["budget_bytes"]),
+                format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
             )
 
 
@@ -646,23 +610,23 @@ class PairwiseCCM:
         stream_corr = (not return_pred) and (getattr(metric_fn, "__name__", "") == "batch_corr")
         corr_state = None
         if stream_corr:
-            corr_state = self._corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
+            corr_state = corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
 
         # Keep full output off accelerator in score mode so device memory tracks batch size.
         out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
         A = None if stream_corr else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
-        for s0 in self._batch_starts(subsample_size, sample_batch_size, "simplex batches"):
+        for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "simplex batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             self.logger.debug(
                 "Simplex batch [%d:%d) started (batch_queries=%d)",
                 int(s0), int(s1), int(s1 - s0)
             )
             timings = {}
-            t_batch = self._tic() if self._debug_enabled() else None
+            t_batch = tic(self.logger, self.device) if self._debug_enabled() else None
 
             try:
-                with self._time_block(timings, "neighbors"):
+                with time_block(self.logger, self.device, timings, "neighbors"):
                     X_sample_b = X_sample[:, s0:s1, :].to(device=self.device, dtype=self.dtype, copy=False)
                     weights, indices = self.__get_nbrs_indices_with_weights(
                         X_lib, X_sample_b,
@@ -670,28 +634,28 @@ class PairwiseCCM:
                         exclusion_rad
                     )
             except RuntimeError as e:
-                if self._is_oom(e):
+                if is_oom_error(e):
                     self.logger.warning("OOM in simplex batch [%d:%d): %s", int(s0), int(s1), str(e))
-                    self._hard_clear()
+                    hard_clear(self.logger, self.device)
                 raise
 
             I = indices
 
             weights_c = weights.to(self.compute_dtype)
 
-            with self._time_block(timings, "gather"):
+            with time_block(self.logger, self.device, timings, "gather"):
                 Y_idx = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2)[I]
                 Y_lib_shifted_indexed = Y_idx.reshape(num_ts_X, s1 - s0, nbrs_num_max, num_ts_Y, max_E_Y)
 
-            with self._time_block(timings, "weighted_avg"):
+            with time_block(self.logger, self.device, timings, "weighted_avg"):
                 A_blk = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
                 A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
 
-            with self._time_block(timings, "store"):
+            with time_block(self.logger, self.device, timings, "store"):
                 if stream_corr:
                     B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
                         .expand(s1 - s0, max_E_Y, num_ts_Y, num_ts_X)
-                    self._corr_state_update(
+                    corr_state_update(
                         corr_state,
                         A_blk.to(device="cpu", dtype=self.compute_dtype),
                         B_blk,
@@ -701,12 +665,12 @@ class PairwiseCCM:
                     A[s0:s1] = A_blk.to(out_device, dtype=self.dtype)
 
             if self._debug_enabled():
-                timings["total"] = self._toc_ms(t_batch)
+                timings["total"] = toc_ms(self.logger, self.device, t_batch)
                 self.logger.debug(
                     "Simplex batch [%d:%d) timings: %s",
                     int(s0),
                     int(s1),
-                    self._timings_summary(
+                    timings_summary(
                         timings,
                         order=["neighbors", "gather", "weighted_avg", "store", "total"],
                     ),
@@ -715,7 +679,7 @@ class PairwiseCCM:
             del weights, indices, I, weights_c, Y_idx, Y_lib_shifted_indexed, A_blk
 
         if stream_corr:
-            return self._corr_state_finalize(corr_state)
+            return corr_state_finalize(corr_state)
 
         if (Y_sample_shifted is None) and return_pred:
             return A
@@ -744,7 +708,7 @@ class PairwiseCCM:
         stream_corr = (not return_pred) and (getattr(metric_fn, "__name__", "") == "batch_corr")
         corr_state = None
         if stream_corr:
-            corr_state = self._corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
+            corr_state = corr_state_init(max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=self.compute_dtype)
 
         # Keep full output off accelerator in score mode so device memory tracks batch size.
         out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
@@ -767,7 +731,7 @@ class PairwiseCCM:
             str(theta),
             str(ridge),
         )
-        for s0 in self._batch_starts(subsample_size, sample_batch_size, "smap batches"):
+        for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "smap batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             B  = s1 - s0
             self.logger.debug(
@@ -775,65 +739,65 @@ class PairwiseCCM:
                 int(s0), int(s1), int(s1 - s0)
             )
             timings = {}
-            t_batch = self._tic() if self._debug_enabled() else None
+            t_batch = tic(self.logger, self.device) if self._debug_enabled() else None
 
             # Slice the queries 
-            with self._time_block(timings, "slice"):
+            with time_block(self.logger, self.device, timings, "slice"):
                 X_sample_b = X_sample[:, s0:s1, :].to(device=self.device, dtype=self.dtype, copy=False)  # (num_ts_X, B, max_E_X)
 
             try:
-                with self._time_block(timings, "local_weights"):
+                with time_block(self.logger, self.device, timings, "local_weights"):
                     weights = self.__get_local_weights(
                         lib=X_lib, sublib=X_sample_b,
                         subset_idx=lib_indices, sample_idx=smpl_indices[s0:s1],
                         exclusion_rad=exclusion_rad, theta=theta
                     ).to(self.compute_dtype)
 
-                with self._time_block(timings, "square"):
+                with time_block(self.logger, self.device, timings, "square"):
                     w2 = weights * weights  # (nX, B, L)
 
-                with self._time_block(timings, "cast_xy"):
+                with time_block(self.logger, self.device, timings, "cast_xy"):
                     Xc = X_lib.to(self.compute_dtype)         # (nX, L, Ex)
                     Yc = Y_lib_shifted.to(self.compute_dtype) # (nY, L, Ey)
 
-                with self._time_block(timings, "design"):
+                with time_block(self.logger, self.device, timings, "design"):
                     onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
                     Xint  = torch.cat([onesL, Xc], dim=2)     # (nX, L, Ex1)
 
                 # XTWX: (nX, B, Ex1, Ex1)
-                with self._time_block(timings, "XTWX"):
+                with time_block(self.logger, self.device, timings, "XTWX"):
                     XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, w2, Xint)
                     if ridge and ridge > 0.0:
                         I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
                         XTWX = XTWX + ridge * I
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
-                with self._time_block(timings, "XTWy"):
+                with time_block(self.logger, self.device, timings, "XTWy"):
                     XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, w2, Yc).reshape(
                         num_ts_X, B, max_E_X + 1, num_ts_Y * max_E_Y
                     )
 
-                with self._time_block(timings, "cholesky"):
+                with time_block(self.logger, self.device, timings, "cholesky"):
                     Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)
-                with self._time_block(timings, "solve"):
+                with time_block(self.logger, self.device, timings, "solve"):
                     beta  = torch.cholesky_solve(XTWy, Lchol)           # (nX, B, Ex1, nY*Ey)
 
-                with self._time_block(timings, "query_design"):
+                with time_block(self.logger, self.device, timings, "query_design"):
                     Xq = X_sample_b.to(self.compute_dtype)              # (nX, B, Ex)
                     Xq = torch.cat(
                         [torch.ones((num_ts_X, B, 1), device=self.device, dtype=self.compute_dtype), Xq],
                         dim=2
                     )                                                   # (nX, B, Ex1)
 
-                with self._time_block(timings, "predict"):
+                with time_block(self.logger, self.device, timings, "predict"):
                     pred_flat = torch.matmul(Xq.unsqueeze(2), beta).squeeze(2)  # (nX, B, nY*Ey)
 
-                with self._time_block(timings, "store"):
+                with time_block(self.logger, self.device, timings, "store"):
                     A = pred_flat.view(num_ts_X, B, num_ts_Y, max_E_Y).permute(1, 3, 2, 0)  # (B,Ey,nY,nX)
                     if stream_corr:
                         B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
                             .expand(B, max_E_Y, num_ts_Y, num_ts_X)
-                        self._corr_state_update(
+                        corr_state_update(
                             corr_state,
                             A.to(device="cpu", dtype=self.compute_dtype),
                             B_blk,
@@ -843,12 +807,12 @@ class PairwiseCCM:
                         A_all[s0:s1] = A.to(out_device, dtype=self.dtype)
 
                 if self._debug_enabled():
-                    timings["total"] = self._toc_ms(t_batch)
+                    timings["total"] = toc_ms(self.logger, self.device, t_batch)
                     self.logger.debug(
                         "SMAP batch [%d:%d) timings: %s",
                         int(s0),
                         int(s1),
-                        self._timings_summary(
+                        timings_summary(
                             timings,
                             order=["slice", "local_weights", "square", "cast_xy", "design", "XTWX", "XTWy",
                                    "cholesky", "solve", "query_design", "predict", "store", "total"],
@@ -857,13 +821,13 @@ class PairwiseCCM:
 
                 del w2, Xc, Yc, onesL, Xint, XTWX, XTWy, Lchol, beta, Xq, pred_flat, A
             except RuntimeError as e:
-                if self._is_oom(e):
+                if is_oom_error(e):
                     self.logger.warning("OOM in SMAP batch [%d:%d): %s", int(s0), int(s1), str(e))
-                    self._hard_clear()
+                    hard_clear(self.logger, self.device)
                 raise
 
         if stream_corr:
-            return self._corr_state_finalize(corr_state)
+            return corr_state_finalize(corr_state)
 
         if (Y_sample_shifted is None) and return_pred:
             return A_all
@@ -878,36 +842,6 @@ class PairwiseCCM:
             return (r_AB, A_all)
         else:
             return r_AB
-
-    def _corr_state_init(self, Ey, nY, nX, *, device, dtype):
-        shape = (Ey, nY, nX)
-        z = torch.zeros(shape, device=device, dtype=dtype)
-        return {
-            "n": 0,
-            "sumA": z.clone(),
-            "sumB": z.clone(),
-            "sumAA": z.clone(),
-            "sumBB": z.clone(),
-            "sumAB": z.clone(),
-        }
-
-    def _corr_state_update(self, state, A_blk, B_blk):
-        state["n"] += int(A_blk.shape[0])
-        state["sumA"] += A_blk.sum(dim=0)
-        state["sumB"] += B_blk.sum(dim=0)
-        state["sumAA"] += (A_blk * A_blk).sum(dim=0)
-        state["sumBB"] += (B_blk * B_blk).sum(dim=0)
-        state["sumAB"] += (A_blk * B_blk).sum(dim=0)
-
-    def _corr_state_finalize(self, state, eps=1e-12):
-        n = max(int(state["n"]), 1)
-        n_t = torch.tensor(float(n), device=state["sumA"].device, dtype=state["sumA"].dtype)
-        num = state["sumAB"] - (state["sumA"] * state["sumB"] / n_t)
-        denA = state["sumAA"] - (state["sumA"] * state["sumA"] / n_t)
-        denB = state["sumBB"] - (state["sumB"] * state["sumB"] / n_t)
-        eps_t = torch.tensor(eps, device=state["sumA"].device, dtype=state["sumA"].dtype)
-        return num / torch.sqrt(denA * denB + eps_t)
-        
 
     def __get_random_indices(self, num_points, sample_len, generator=None):
         #idxs_X = torch.argsort(torch.rand(num_points, device=self.device, generator=generator))[0:sample_len]
@@ -933,20 +867,20 @@ class PairwiseCCM:
     ):
         timings = {}
         try:
-            with self._time_block(timings, "cdist"):
+            with time_block(self.logger, self.device, timings, "cdist"):
                 dist = self._cdist(sample, lib)  # (num_ts_X, S_blk, L)
         except RuntimeError as e:
-            if self._is_oom(e):
-                self._hard_clear()
+            if is_oom_error(e):
+                hard_clear(self.logger, self.device)
             raise
 
         if exclusion_rad is None:
-            with self._time_block(timings, "select"):
+            with time_block(self.logger, self.device, timings, "select"):
                 near_dist, indices = torch.topk(dist, 1 + n_nbrs_max, largest=False, sorted=False)
                 indices   = indices[:, :, :n_nbrs_max]
                 near_dist = near_dist[:, :, :n_nbrs_max]
         else:
-            with self._time_block(timings, "select"):
+            with time_block(self.logger, self.device, timings, "select"):
                 allowed = (
                     (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
                     (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
@@ -954,27 +888,27 @@ class PairwiseCCM:
                 dist = dist.masked_fill(~allowed.unsqueeze(0), float("inf"))
                 near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
 
-        with self._time_block(timings, "weights"):
+        with time_block(self.logger, self.device, timings, "weights"):
             weights, indices = self.__weights_from_dists(near_dist, indices, n_nbrs, n_nbrs_max)
 
         if self._debug_enabled():
             timings["total"] = sum(v for v in timings.values())
-            self.logger.debug("Neighbor search timings: %s", self._timings_summary(timings, ["cdist", "select", "weights", "total"]))
+            self.logger.debug("Neighbor search timings: %s", timings_summary(timings, ["cdist", "select", "weights", "total"]))
         return weights, indices
     
     def __weights_from_dists(self, near_dist, indices, n_nbrs, n_nbrs_max):
         timings = {}
         eps = torch.finfo(near_dist.dtype).eps
-        with self._time_block(timings, "exp"):
+        with time_block(self.logger, self.device, timings, "exp"):
             d0 = near_dist.min(dim=2, keepdim=True).values.clamp_min(eps)
             w  = torch.exp(-near_dist / d0)
             w  = torch.where(torch.isfinite(near_dist), w, torch.zeros_like(w))
 
-        with self._time_block(timings, "mask"):
+        with time_block(self.logger, self.device, timings, "mask"):
             keep = (torch.arange(n_nbrs_max, device=w.device).unsqueeze(0) < n_nbrs.unsqueeze(1))
             w = w * keep[:, None, :].to(w.dtype)
 
-        with self._time_block(timings, "normalize"):
+        with time_block(self.logger, self.device, timings, "normalize"):
             sumw = w.sum(dim=2, keepdim=True)
             zero = sumw <= eps
             if zero.any():
@@ -988,7 +922,7 @@ class PairwiseCCM:
 
         if self._debug_enabled():
             timings["total"] = sum(v for v in timings.values())
-            self.logger.debug("Neighbor weight timings: %s", self._timings_summary(timings, ["exp", "mask", "normalize", "total"]))
+            self.logger.debug("Neighbor weight timings: %s", timings_summary(timings, ["exp", "mask", "normalize", "total"]))
         return out, indices
 
 
@@ -1016,146 +950,10 @@ class PairwiseCCM:
             b = self.__to_tensor(b, dtype=comp)
             return torch.cdist(a, b, p=2, compute_mode="use_mm_for_euclid_dist")
         except RuntimeError as e:
-            if self._is_oom(e):
-                self._hard_clear()
+            if is_oom_error(e):
+                hard_clear(self.logger, self.device)
             raise
 
-
-    def _is_oom(self, e: Exception) -> bool:
-        msg = str(e).lower()
-        return any(s in msg for s in (
-            "cuda out of memory", "out of memory", "failed to allocate",
-            "can't allocate memory", "cublas status alloc failed", "mps allocation failed"
-        ))
-
-    def _soft_clear(self):
-        self.logger.info("Running soft memory cleanup")
-        gc.collect()
-        if self.device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        self.logger.info("Soft memory cleanup finished")
-
-    def _hard_clear(self):
-        self.logger.warning("Running hard memory cleanup after OOM")
-        gc.collect()
-        if self.device.startswith("cuda") and torch.cuda.is_available():
-            try:
-                torch.cuda.synchronize(self.device)
-            except Exception:
-                pass
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            try:
-                torch.cuda.reset_peak_memory_stats(self.device)
-            except Exception:
-                pass
-        self.logger.warning("Hard memory cleanup finished")
-
-    def __auto_batch_size_smap(self, X_lib, X_sample, Y_lib_s, budget_gb=2.0):
-
-        num_ts_X, L, max_E_X = X_lib.shape
-        num_ts_Y, _, max_E_Y = Y_lib_s.shape
-        S = X_sample.shape[1]
-
-        cbytes = torch.tensor([], dtype=self.compute_dtype).element_size()
-        dbytes = torch.tensor([], dtype=self.dtype).element_size()
-        ex1 = int(max_E_X + 1)
-        nX = int(num_ts_X)
-        nY = int(num_ts_Y)
-        Ey = int(max_E_Y)
-        L = int(L)
-
-        # Per-query memory model (B=1) based on tensors materialized in __smap_prediction.
-        per_sample_bytes = cbytes * (
-            nX * L +                  # dist
-            nX * L +                  # weights
-            nX * L +                  # w2
-            nX * L * int(max_E_X) +   # Xc
-            nY * L * Ey +             # Yc
-            nX * L +                  # onesL
-            nX * L * ex1 +            # Xint
-            nX * ex1 * ex1 +          # XTWX
-            nX * ex1 * nY * Ey +      # XTWy
-            nX * ex1 * ex1 +          # Lchol
-            nX * ex1 * nY * Ey +      # beta
-            nX * ex1 +                # Xq
-            nX * nY * Ey              # pred_flat
-        ) + dbytes * (nX * nY * Ey)   # output cast/store
-
-        # Conservative headroom for temporary kernels and allocator overhead.
-        per_sample_bytes = int(per_sample_bytes * 1.15)
-
-        budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
-
-        if per_sample_bytes <= 0:
-            B = min(int(S), 1)
-            return B, {
-                "per_sample_bytes": int(per_sample_bytes),
-                "budget_bytes": int(budget_bytes),
-                "estimated_peak_bytes": int(B * max(per_sample_bytes, 0)),
-            }
-
-        B = budget_bytes // per_sample_bytes
-        if B < 1:
-            B = 1
-        if B > int(S):
-            B = int(S)
-        B = int(B)
-        return B, {
-            "per_sample_bytes": int(per_sample_bytes),
-            "budget_bytes": int(budget_bytes),
-            "estimated_peak_bytes": int(B * per_sample_bytes),
-        }
-    
-    def __auto_batch_size_simplex(self, X_lib, X_sample, Y_lib_s, nbrs_num_max, budget_gb=2.0):
-        """
-        Estimate samples chunk size B for simplex using actual tensors.
-        Conservative: counts cdist, KNN book-keeping, your 5D weights_c & gathered Y,
-        the elementwise product, and the block output. Targets an ~budget_gb cap.
-        """
-        # Shapes
-        num_ts_X, L, _      = X_lib.shape            # (nX, L, Ex)
-        num_ts_Y, _, max_EY = Y_lib_s.shape          # (nY, L, Ey)
-        S                   = X_sample.shape[1]
-        nX, nY, Ey, K       = int(num_ts_X), int(num_ts_Y), int(max_EY), int(nbrs_num_max)
-
-        # dtype sizes
-        cbytes = torch.tensor([], dtype=self.compute_dtype).element_size()  
-        dbytes = torch.tensor([], dtype=self.dtype).element_size()        
-        ibytes = 8  # int64 indices
-
-        cdist_per_sample = cbytes * (nX * L)
-
-        knn_per_sample = (dbytes + ibytes) * (nX * K)
-
-        core_5d_per_sample = cbytes * (3 * K * Ey * nY * nX)
-
-        out_per_sample = dbytes * (Ey * nY * nX)
-
-        per_sample_bytes = int(cdist_per_sample + knn_per_sample + core_5d_per_sample + out_per_sample)
-
-        budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
-
-        if per_sample_bytes <= 0:
-            B = min(int(S), 1)
-            return B, {
-                "per_sample_bytes": int(per_sample_bytes),
-                "budget_bytes": int(budget_bytes),
-                "estimated_peak_bytes": int(B * max(per_sample_bytes, 0)),
-            }
-
-        B = budget_bytes // per_sample_bytes
-        if B < 1:
-            B = 1
-        if B > int(S):
-            B = int(S)
-        B = int(B)
-        return B, {
-            "per_sample_bytes": int(per_sample_bytes),
-            "budget_bytes": int(budget_bytes),
-            "estimated_peak_bytes": int(B * per_sample_bytes),
-        }
-    
     def __to_tensor(self, arr, *, dtype=None, device=None):
         dtype  = self.dtype  if dtype  is None else dtype
         device = self.device if device is None else device
@@ -1163,61 +961,5 @@ class PairwiseCCM:
             return arr.to(device=device, dtype=dtype, copy=False)
         return torch.as_tensor(arr, device=device, dtype=dtype)
 
-    def _format_bytes(self, n):
-        if n is None:
-            return "n/a"
-        n = float(n)
-        units = ["B", "KB", "MB", "GB", "TB", "PB"]
-        i = 0
-        while n >= 1024.0 and i < len(units) - 1:
-            n /= 1024.0
-            i += 1
-        return f"{n:.2f}{units[i]}"
-
-    def _tic(self):
-        if self.logger.isEnabledFor(logging.DEBUG) and self.device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
-        return time.perf_counter()
-
-    def _toc_ms(self, start):
-        if self.logger.isEnabledFor(logging.DEBUG) and self.device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
-        return (time.perf_counter() - start) * 1000.0
-
-    def _format_ms(self, ms):
-        return f"{ms:.3f}ms"
-
     def _debug_enabled(self):
         return self.logger.isEnabledFor(logging.DEBUG)
-
-    @contextmanager
-    def _time_block(self, timings: dict, key: str):
-        if not self._debug_enabled():
-            yield
-            return
-        t0 = self._tic()
-        try:
-            yield
-        finally:
-            timings[key] = self._toc_ms(t0)
-
-    def _timings_summary(self, timings: dict, order=None):
-        keys = order if order is not None else timings.keys()
-        return " ".join(
-            f"{k}={self._format_ms(timings[k])}" for k in keys if k in timings
-        )
-
-    def _batch_starts(self, total_samples, sample_batch_size, desc):
-        starts = range(0, total_samples, sample_batch_size)
-        if not self.logger.isEnabledFor(logging.INFO):
-            return starts
-        if tqdm is None:
-            return starts
-        return tqdm(
-            starts,
-            total=int(math.ceil(total_samples / sample_batch_size)),
-            desc=desc,
-            unit="batch",
-            leave=False,
-            dynamic_ncols=True,
-        )

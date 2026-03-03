@@ -120,3 +120,35 @@ def get_metric(name: str) -> Metric:
     if name not in _METRICS:
         raise ValueError(f"Unknown metric: {name}. Available: {list(_METRICS)}")
     return _METRICS[name]
+
+
+def corr_state_init(Ey, nY, nX, *, device, dtype):
+    shape = (Ey, nY, nX)
+    z = torch.zeros(shape, device=device, dtype=dtype)
+    return {
+        "n": 0,
+        "sumA": z.clone(),
+        "sumB": z.clone(),
+        "sumAA": z.clone(),
+        "sumBB": z.clone(),
+        "sumAB": z.clone(),
+    }
+
+
+def corr_state_update(state, A_blk, B_blk):
+    state["n"] += int(A_blk.shape[0])
+    state["sumA"] += A_blk.sum(dim=0)
+    state["sumB"] += B_blk.sum(dim=0)
+    state["sumAA"] += (A_blk * A_blk).sum(dim=0)
+    state["sumBB"] += (B_blk * B_blk).sum(dim=0)
+    state["sumAB"] += (A_blk * B_blk).sum(dim=0)
+
+
+def corr_state_finalize(state, eps=1e-12):
+    n = max(int(state["n"]), 1)
+    n_t = torch.tensor(float(n), device=state["sumA"].device, dtype=state["sumA"].dtype)
+    num = state["sumAB"] - (state["sumA"] * state["sumB"] / n_t)
+    denA = state["sumAA"] - (state["sumA"] * state["sumA"] / n_t)
+    denB = state["sumBB"] - (state["sumB"] * state["sumB"] / n_t)
+    eps_t = torch.tensor(eps, device=state["sumA"].device, dtype=state["sumA"].dtype)
+    return num / torch.sqrt(denA * denB + eps_t)
