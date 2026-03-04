@@ -10,7 +10,15 @@ import os
 
 
 class Functions:
-    def __init__(self, device="cpu",dtype="float32", compute_dtype="float32", memory_budget_gb=2.0):
+    def __init__(
+        self,
+        device="cpu",
+        dtype="float32",
+        compute_dtype="float32",
+        memory_budget_gb=2.0,
+        verbose=0,
+        log_file=None,
+    ):
         """
         Initializes the CCMFunction with a PairwiseCCM instance.
 
@@ -22,6 +30,8 @@ class Functions:
             dtype=dtype,
             compute_dtype=compute_dtype,
             memory_budget_gb=memory_budget_gb,
+            verbose=verbose,
+            log_file=log_file,
         )
 
     def _make_out_array(self, shape, dtype=np.float32, out_path=None, fill_value=np.nan, order="C"):
@@ -145,6 +155,7 @@ class Functions:
                     method=method,
                     seed=seed,
                     metric=metric,
+                    clean_after=False,
                     **kwargs
                 )  # shape: (E_y_blk, y_len, x_len)
 
@@ -194,9 +205,9 @@ class Functions:
 
         # Build a trimmed X_pred view so every block uses the same S_pred
         if X_pred_emb is None:
-            X_pred_trimmed = [x[:S_pred] for x in X_lib_emb]
+            X_pred_trimmed = [x[-S_pred:] for x in X_lib_emb]
         else:
-            X_pred_trimmed = [x[:S_pred] for x in X_pred_emb]
+            X_pred_trimmed = [x[-S_pred:] for x in X_pred_emb]
 
         #out = np.full((S_pred, E_y_max, nY, nX), np.nan, dtype=np.float32)
         out = self._make_out_array((S_pred, E_y_max, nY, nX), dtype=out_dtype, out_path=out_path, fill_value=np.nan)
@@ -216,6 +227,7 @@ class Functions:
                     method=method,
                     seed=seed,
                     metric=metric,
+                    clean_after=False,
                     **kwargs
                 )  # shape: (S_pred, E_y_blk, y_len, x_len)
 
