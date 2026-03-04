@@ -1,6 +1,8 @@
 # FastCCM
 PyTorch-based implementation of Convergent Cross Mapping (CCM) optimized for calculating pairwise CCM matrices.
 
+FastCCM computes exact CCM scores equivalent to `pyEDM>=2.3.2`.
+
 ## Performance 
 
 Measured on **CPU, Apple M2 16GB**
