@@ -25,8 +25,8 @@ from .utils.runtime import (
 from .utils.logger import setup_logger
 import math
 import logging
-torch.set_num_threads(os.cpu_count())  
-torch.set_num_interop_threads(1)
+#torch.set_num_threads(os.cpu_count())  
+#torch.set_num_interop_threads(1)
 
 def _resolve_dtype(x):
     if isinstance(x, torch.dtype):
@@ -751,6 +751,15 @@ class PairwiseCCM:
             str(theta),
             str(ridge),
         )
+
+        Xc = X_lib.to(self.compute_dtype)                 # (nX, L, Ex)
+        Yc = Y_lib_shifted.to(self.compute_dtype)         # (nY, L, Ey)
+        onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
+        Xint = torch.cat([onesL, Xc], dim=2)             # (nX, L, Ex1)
+        I = None
+        if ridge and ridge > 0.0:
+            I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
+
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "smap batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
             B  = s1 - s0
@@ -774,26 +783,17 @@ class PairwiseCCM:
                     ).to(self.compute_dtype)
 
                 with time_block(self.logger, self.device, timings, "square"):
-                    w2 = weights * weights  # (nX, B, L)
-
-                with time_block(self.logger, self.device, timings, "cast_xy"):
-                    Xc = X_lib.to(self.compute_dtype)         # (nX, L, Ex)
-                    Yc = Y_lib_shifted.to(self.compute_dtype) # (nY, L, Ey)
-
-                with time_block(self.logger, self.device, timings, "design"):
-                    onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
-                    Xint  = torch.cat([onesL, Xc], dim=2)     # (nX, L, Ex1)
+                    weights.square_()  # (nX, B, L) in-place; avoid extra w2 allocation
 
                 # XTWX: (nX, B, Ex1, Ex1)
                 with time_block(self.logger, self.device, timings, "XTWX"):
-                    XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, w2, Xint)
-                    if ridge and ridge > 0.0:
-                        I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
+                    XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, weights, Xint)
+                    if I is not None:
                         XTWX = XTWX + ridge * I
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
                 with time_block(self.logger, self.device, timings, "XTWy"):
-                    XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, w2, Yc).reshape(
+                    XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, weights, Yc).reshape(
                         num_ts_X, B, max_E_X + 1, num_ts_Y * max_E_Y
                     )
 
@@ -841,7 +841,7 @@ class PairwiseCCM:
                         ),
                     )
 
-                del w2, Xc, Yc, onesL, Xint, XTWX, XTWy, Lchol, beta, Xq, pred_flat, A
+                del weights, XTWX, XTWy, Lchol, beta, Xq, pred_flat, A
             except RuntimeError as e:
                 if is_oom_error(e):
                     self.logger.warning("OOM in SMAP batch [%d:%d): %s", int(s0), int(s1), str(e))
