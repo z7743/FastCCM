@@ -629,6 +629,8 @@ class PairwiseCCM:
 
         # Keep full output off accelerator in score mode so device memory tracks batch size.
         out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
+        # Prepare library targets once; doing this inside the loop dominates "gather" time.
+        Y_lib_lne = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2).contiguous()
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
         A = None if stream_kind is not None else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "simplex batches"):
@@ -659,7 +661,7 @@ class PairwiseCCM:
             weights_c = weights.to(self.compute_dtype)
 
             with time_block(self.logger, self.device, timings, "gather"):
-                Y_idx = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2)[I]
+                Y_idx = Y_lib_lne[I]
                 Y_lib_shifted_indexed = Y_idx.reshape(num_ts_X, s1 - s0, nbrs_num_max, num_ts_Y, max_E_Y)
 
             with time_block(self.logger, self.device, timings, "weighted_avg"):
