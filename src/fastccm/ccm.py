@@ -27,7 +27,6 @@ import math
 import logging
 #torch.set_num_threads(os.cpu_count())  
 #torch.set_num_interop_threads(1)
-
 def _resolve_dtype(x):
     if isinstance(x, torch.dtype):
         return x
@@ -780,7 +779,7 @@ class PairwiseCCM:
                         lib=X_lib, sublib=X_sample_b,
                         subset_idx=lib_indices, sample_idx=smpl_indices[s0:s1],
                         exclusion_rad=exclusion_rad, theta=theta
-                    ).to(self.compute_dtype)
+                    )
 
                 with time_block(self.logger, self.device, timings, "square"):
                     weights.square_()  # (nX, B, L) in-place; avoid extra w2 allocation
@@ -898,16 +897,16 @@ class PairwiseCCM:
 
         if exclusion_rad is None:
             with time_block(self.logger, self.device, timings, "select"):
-                near_dist, indices = torch.topk(dist, 1 + n_nbrs_max, largest=False, sorted=False)
-                indices   = indices[:, :, :n_nbrs_max]
-                near_dist = near_dist[:, :, :n_nbrs_max]
+                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
         else:
             with time_block(self.logger, self.device, timings, "select"):
+                #allowed = torch.abs(lib_idx[None, :] - sample_idx[:, None]) > exclusion_rad  # (S_blk, L)
                 allowed = (
                     (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
                     (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
-                )  # (S_blk, L)
-                dist = dist.masked_fill(~allowed.unsqueeze(0), float("inf"))
+                ) 
+                #dist = dist.masked_fill(~allowed.unsqueeze(0), float("inf"))
+                dist.masked_fill_(~allowed.unsqueeze(0), float("inf"))
                 near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
 
         with time_block(self.logger, self.device, timings, "weights"):
@@ -923,8 +922,10 @@ class PairwiseCCM:
         eps = torch.finfo(near_dist.dtype).eps
         with time_block(self.logger, self.device, timings, "exp"):
             d0 = near_dist.min(dim=2, keepdim=True).values.clamp_min(eps)
-            w  = torch.exp(-near_dist / d0)
-            w  = torch.where(torch.isfinite(near_dist), w, torch.zeros_like(w))
+            #w  = torch.exp(-near_dist / d0)
+            #w  = torch.where(torch.isfinite(near_dist), w, torch.zeros_like(w))
+            w = torch.exp(-near_dist / d0)
+            w.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
 
         with time_block(self.logger, self.device, timings, "mask"):
             keep = (torch.arange(n_nbrs_max, device=w.device).unsqueeze(0) < n_nbrs.unsqueeze(1))
@@ -951,17 +952,21 @@ class PairwiseCCM:
     def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, theta):
         dist = self._cdist(sublib, lib)
         if theta == None:
-            weights = torch.exp(-(dist))
+            weights = dist.neg_().exp_()
         else:
             denom = dist.mean(dim=2, keepdim=True).clamp_min(1e-12)  # (n_X, S, 1)
-            weights = torch.exp(-(theta * dist / denom))
+            weights = dist.mul_(-theta).div_(denom).exp_() 
 
         #if exclusion_rad > 0:
         if exclusion_rad is not None:
-            exclusion_matrix = (torch.abs(subset_idx[None] - sample_idx[:,None]) > exclusion_rad)
-            weights = weights * exclusion_matrix.to(weights.dtype)
-    
-        return weights.to(self.dtype)
+            #allowed = (torch.abs(subset_idx[None] - sample_idx[:,None]) > exclusion_rad)
+            allowed = (
+                    (subset_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
+                    (subset_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
+                ) 
+            weights.masked_fill_(~allowed.unsqueeze(0), 0.0)
+
+        return weights
       
     def _cdist(self, a, b):
         comp = self.compute_dtype
