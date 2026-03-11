@@ -186,7 +186,7 @@ def smap_xtwx_precompute_policy(X_lib, *, compute_dtype, budget_gb=2.0):
     ex1 = int(max_E_X + 1)
     cbytes = torch.tensor([], dtype=compute_dtype).element_size()
     budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
-    precompute_budget_bytes = min(budget_bytes // 8, 512 * 1024 * 1024)
+    precompute_budget_bytes = min(budget_bytes, 512 * 1024 * 1024)
     feature_bytes = int(num_ts_X) * int(L) * ex1 * ex1 * cbytes
     use_precompute = feature_bytes <= precompute_budget_bytes
     return use_precompute, {

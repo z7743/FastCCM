@@ -786,6 +786,19 @@ class PairwiseCCM:
         I = None
         if ridge and ridge > 0.0:
             I = torch.eye(ex1, device=self.device, dtype=self.compute_dtype)[None, None]
+        weighted_design_buf = torch.empty(
+            (num_ts_X, sample_batch_size, ex1, subset_size),
+            device=self.device,
+            dtype=self.compute_dtype,
+        )
+        tail_batch_size = subsample_size % sample_batch_size
+        weighted_design_tail_buf = None
+        if tail_batch_size:
+            weighted_design_tail_buf = torch.empty(
+                (num_ts_X, tail_batch_size, ex1, subset_size),
+                device=self.device,
+                dtype=self.compute_dtype,
+            )
 
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "smap batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
@@ -823,10 +836,9 @@ class PairwiseCCM:
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
                 with time_block(self.logger, self.device, timings, "XTWy"):
-                    XTWy = torch.matmul(
-                        weights.unsqueeze(-2) * Xint_t.unsqueeze(1),
-                        Yc_flat,
-                    )
+                    weighted_design = weighted_design_buf if B == sample_batch_size else weighted_design_tail_buf
+                    torch.mul(weights.unsqueeze(-2), Xint_t.unsqueeze(1), out=weighted_design)
+                    XTWy = torch.matmul(weighted_design, Yc_flat)
 
                 with time_block(self.logger, self.device, timings, "cholesky"):
                     Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)
