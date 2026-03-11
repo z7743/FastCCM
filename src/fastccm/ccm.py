@@ -763,6 +763,8 @@ class PairwiseCCM:
         Yc = Y_lib_shifted.to(self.compute_dtype)         # (nY, L, Ey)
         onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
         Xint = torch.cat([onesL, Xc], dim=2)             # (nX, L, Ex1)
+        Xint_t = Xint.transpose(1, 2).contiguous()       # (nX, Ex1, L)
+        Yc_flat = Yc.permute(1, 0, 2).reshape(subset_size, num_ts_Y * max_E_Y).contiguous()
         use_precomputed_xtwx, xtwx_precompute_meta = smap_xtwx_precompute_policy(
             X_lib,
             compute_dtype=self.compute_dtype,
@@ -821,8 +823,9 @@ class PairwiseCCM:
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
                 with time_block(self.logger, self.device, timings, "XTWy"):
-                    XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, weights, Yc).reshape(
-                        num_ts_X, B, ex1, num_ts_Y * max_E_Y
+                    XTWy = torch.matmul(
+                        weights.unsqueeze(-2) * Xint_t.unsqueeze(1),
+                        Yc_flat,
                     )
 
                 with time_block(self.logger, self.device, timings, "cholesky"):
