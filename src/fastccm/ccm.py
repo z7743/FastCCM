@@ -20,6 +20,7 @@ from .utils.runtime import (
     timings_summary,
     auto_batch_size_smap,
     auto_batch_size_simplex,
+    smap_xtwx_precompute_policy,
     batch_starts,
 )
 from .utils.logger import setup_logger
@@ -666,6 +667,11 @@ class PairwiseCCM:
 
             with time_block(self.logger, self.device, timings, "weighted_avg"):
                 A_blk = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
+
+                #A_blk = torch.matmul(
+                #    weights_c.unsqueeze(2),
+                #    Y_lib_shifted_indexed.reshape(num_ts_X, s1 - s0, nbrs_num_max, num_ts_Y * max_E_Y),
+                #).reshape(num_ts_X, s1 - s0, num_ts_Y, max_E_Y)
                 A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
 
             if stream_kind is not None:
@@ -757,9 +763,27 @@ class PairwiseCCM:
         Yc = Y_lib_shifted.to(self.compute_dtype)         # (nY, L, Ey)
         onesL = torch.ones((num_ts_X, subset_size, 1), device=self.device, dtype=self.compute_dtype)
         Xint = torch.cat([onesL, Xc], dim=2)             # (nX, L, Ex1)
+        use_precomputed_xtwx, xtwx_precompute_meta = smap_xtwx_precompute_policy(
+            X_lib,
+            compute_dtype=self.compute_dtype,
+            budget_gb=self.memory_budget_gb,
+        )
+        ex1 = xtwx_precompute_meta["ex1"]
+
+        XTWX_features = None
+        if use_precomputed_xtwx:
+            XTWX_features = torch.matmul(Xint.unsqueeze(-1), Xint.unsqueeze(-2)).reshape(
+                num_ts_X, subset_size, ex1 * ex1
+            )
+        else:
+            self.logger.debug(
+                "Skipping XTWX precompute: needs %s, budget cap %s",
+                format_bytes(xtwx_precompute_meta["feature_bytes"]),
+                format_bytes(xtwx_precompute_meta["budget_bytes"]),
+            )
         I = None
         if ridge and ridge > 0.0:
-            I = torch.eye(max_E_X + 1, device=self.device, dtype=self.compute_dtype)[None, None]
+            I = torch.eye(ex1, device=self.device, dtype=self.compute_dtype)[None, None]
 
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "smap batches"):
             s1 = min(subsample_size, s0 + sample_batch_size)
@@ -788,14 +812,17 @@ class PairwiseCCM:
 
                 # XTWX: (nX, B, Ex1, Ex1)
                 with time_block(self.logger, self.device, timings, "XTWX"):
-                    XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, weights, Xint)
+                    if use_precomputed_xtwx:
+                        XTWX = torch.matmul(weights, XTWX_features).reshape(num_ts_X, B, ex1, ex1)
+                    else:
+                        XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, weights, Xint)
                     if I is not None:
                         XTWX = XTWX + ridge * I
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
                 with time_block(self.logger, self.device, timings, "XTWy"):
                     XTWy = torch.einsum("xli,xbl,yle->xbiye", Xint, weights, Yc).reshape(
-                        num_ts_X, B, max_E_X + 1, num_ts_Y * max_E_Y
+                        num_ts_X, B, ex1, num_ts_Y * max_E_Y
                     )
 
                 with time_block(self.logger, self.device, timings, "cholesky"):

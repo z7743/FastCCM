@@ -11,7 +11,7 @@ class MicrosecondFormatter(logging.Formatter):
         return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
-def setup_logger(name: str, verbose: int = 0, log_file: str | None = None) -> logging.Logger:
+def setup_logger(name: str, verbose: int = 0, log_file: str = None) -> logging.Logger:
     """
     verbose:
       0 -> WARNING

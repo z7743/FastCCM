@@ -181,6 +181,21 @@ def auto_batch_size_simplex(X_lib, X_sample, Y_lib_s, nbrs_num_max, *, dtype, co
     }
 
 
+def smap_xtwx_precompute_policy(X_lib, *, compute_dtype, budget_gb=2.0):
+    num_ts_X, L, max_E_X = X_lib.shape
+    ex1 = int(max_E_X + 1)
+    cbytes = torch.tensor([], dtype=compute_dtype).element_size()
+    budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
+    precompute_budget_bytes = min(budget_bytes // 8, 512 * 1024 * 1024)
+    feature_bytes = int(num_ts_X) * int(L) * ex1 * ex1 * cbytes
+    use_precompute = feature_bytes <= precompute_budget_bytes
+    return use_precompute, {
+        "feature_bytes": int(feature_bytes),
+        "budget_bytes": int(precompute_budget_bytes),
+        "ex1": int(ex1),
+    }
+
+
 def batch_starts(logger: logging.Logger, total_samples, sample_batch_size, desc):
     starts = range(0, total_samples, sample_batch_size)
     if not logger.isEnabledFor(logging.INFO):
