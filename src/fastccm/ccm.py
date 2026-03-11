@@ -20,7 +20,8 @@ from .utils.runtime import (
     timings_summary,
     auto_batch_size_smap,
     auto_batch_size_simplex,
-    smap_xtwx_precompute_policy,
+    smap_xtwx_precompute_bytes,
+    smap_xtwy_precompute_bytes,
     batch_starts,
 )
 from .utils.logger import setup_logger
@@ -194,6 +195,12 @@ class PairwiseCCM:
             Default is 1.0.
         ridge : float, optional (smap only)
             Non-negative ridge penalty added to the local linear regression. Default 0.0.
+        xtwx_precompute : bool, optional (smap only)
+            Whether to precompute the per-library outer-product features used to form
+            SMAP normal matrices (`X^T W X`). Default is True.
+        xtwy_precompute : bool, optional (smap only)
+            Whether to precompute the per-library cross terms used to form SMAP
+            right-hand sides (`X^T W y`). Default is False.
 
         Returns
         -------
@@ -311,6 +318,12 @@ class PairwiseCCM:
             Default is 1.0.
         ridge : float, optional (smap only)
             Non-negative ridge penalty added to the local linear regression. Default 0.0.
+        xtwx_precompute : bool, optional (smap only)
+            Whether to precompute the per-library outer-product features used to form
+            SMAP normal matrices (`X^T W X`). Default is True.
+        xtwy_precompute : bool, optional (smap only)
+            Whether to precompute the per-library cross terms used to form SMAP
+            right-hand sides (`X^T W y`). Default is False.
 
         Returns
         -------
@@ -433,6 +446,12 @@ class PairwiseCCM:
         elif method == "smap":
             ridge = kwargs.get("ridge", 0.0)
             theta = kwargs.get("theta", 1.0)
+            xtwx_precompute = kwargs.get("xtwx_precompute", True)
+            xtwy_precompute = kwargs.get("xtwy_precompute", False)
+            if not isinstance(xtwx_precompute, bool):
+                raise ValueError("xtwx_precompute must be a bool.")
+            if not isinstance(xtwy_precompute, bool):
+                raise ValueError("xtwy_precompute must be a bool.")
         else:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
@@ -580,6 +599,13 @@ class PairwiseCCM:
                 format_bytes(batch_auto_meta["budget_bytes"]),
                 format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
             )
+            self.logger.info(
+                "SMAP config theta=%s ridge=%s xtwx_precompute=%s xtwy_precompute=%s",
+                str(theta),
+                str(ridge),
+                str(xtwx_precompute),
+                str(xtwy_precompute),
+            )
 
 
             out = self.__smap_prediction(
@@ -588,7 +614,9 @@ class PairwiseCCM:
                 exclusion_window, theta, metric_fn=metric_fn,
                 return_pred=(Y_smp_s is None),
                 sample_batch_size=batch_size,
-                ridge=ridge
+                ridge=ridge,
+                xtwx_precompute=xtwx_precompute,
+                xtwy_precompute=xtwy_precompute,
             )
 
 
@@ -723,7 +751,8 @@ class PairwiseCCM:
     @torch.inference_mode()
     def __smap_prediction(self, lib_indices, smpl_indices, X_lib, X_sample, Y_lib_shifted, Y_sample_shifted,
                       exclusion_rad, theta, metric_fn, return_pred=False,
-                      sample_batch_size=None, ridge=0.0):
+                      sample_batch_size=None, ridge=0.0,
+                      xtwx_precompute=True, xtwy_precompute=False):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_X  = X_lib.shape[2]
@@ -745,7 +774,7 @@ class PairwiseCCM:
             sample_batch_size = subsample_size
 
         self.logger.debug(
-            "Entering smap backend (queries=%d, library_points=%d, num_sources=%d, num_targets=%d, Ex=%d, Ey=%d, batch_size=%d, num_batches=%d, exclusion=%s, theta=%s, ridge=%s)",
+            "Entering smap backend (queries=%d, library_points=%d, num_sources=%d, num_targets=%d, Ex=%d, Ey=%d, batch_size=%d, num_batches=%d, exclusion=%s, theta=%s, ridge=%s, xtwx_precompute=%s, xtwy_precompute=%s)",
             int(subsample_size),
             int(subset_size),
             int(num_ts_X),
@@ -757,6 +786,8 @@ class PairwiseCCM:
             str(exclusion_rad),
             str(theta),
             str(ridge),
+            str(xtwx_precompute),
+            str(xtwy_precompute),
         )
 
         Xc = X_lib.to(self.compute_dtype)                 # (nX, L, Ex)
@@ -765,35 +796,40 @@ class PairwiseCCM:
         Xint = torch.cat([onesL, Xc], dim=2)             # (nX, L, Ex1)
         Xint_t = Xint.transpose(1, 2).contiguous()       # (nX, Ex1, L)
         Yc_flat = Yc.permute(1, 0, 2).reshape(subset_size, num_ts_Y * max_E_Y).contiguous()
-        use_precomputed_xtwx, xtwx_precompute_meta = smap_xtwx_precompute_policy(
-            X_lib,
-            compute_dtype=self.compute_dtype,
-            budget_gb=self.memory_budget_gb,
-        )
-        ex1 = xtwx_precompute_meta["ex1"]
+        ex1 = int(max_E_X + 1)
 
         XTWX_features = None
-        if use_precomputed_xtwx:
+        if xtwx_precompute:
+            self.logger.debug(
+                "Building XTWX precompute features (~%s)",
+                format_bytes(smap_xtwx_precompute_bytes(X_lib, compute_dtype=self.compute_dtype)),
+            )
             XTWX_features = torch.matmul(Xint.unsqueeze(-1), Xint.unsqueeze(-2)).reshape(
                 num_ts_X, subset_size, ex1 * ex1
             )
-        else:
+        XTWy_features = None
+        if xtwy_precompute:
             self.logger.debug(
-                "Skipping XTWX precompute: needs %s, budget cap %s",
-                format_bytes(xtwx_precompute_meta["feature_bytes"]),
-                format_bytes(xtwx_precompute_meta["budget_bytes"]),
+                "Building XTWy precompute features (~%s)",
+                format_bytes(smap_xtwy_precompute_bytes(X_lib, Y_lib_shifted, compute_dtype=self.compute_dtype)),
             )
+            XTWy_features = torch.mul(
+                Xint.unsqueeze(-1),
+                Yc_flat.unsqueeze(0).unsqueeze(2),
+            ).reshape(num_ts_X, subset_size, ex1 * num_ts_Y * max_E_Y)
         I = None
         if ridge and ridge > 0.0:
             I = torch.eye(ex1, device=self.device, dtype=self.compute_dtype)[None, None]
-        weighted_design_buf = torch.empty(
-            (num_ts_X, sample_batch_size, ex1, subset_size),
-            device=self.device,
-            dtype=self.compute_dtype,
-        )
+        weighted_design_buf = None
         tail_batch_size = subsample_size % sample_batch_size
         weighted_design_tail_buf = None
-        if tail_batch_size:
+        if not xtwy_precompute:
+            weighted_design_buf = torch.empty(
+                (num_ts_X, sample_batch_size, ex1, subset_size),
+                device=self.device,
+                dtype=self.compute_dtype,
+            )
+        if (not xtwy_precompute) and tail_batch_size:
             weighted_design_tail_buf = torch.empty(
                 (num_ts_X, tail_batch_size, ex1, subset_size),
                 device=self.device,
@@ -827,7 +863,7 @@ class PairwiseCCM:
 
                 # XTWX: (nX, B, Ex1, Ex1)
                 with time_block(self.logger, self.device, timings, "XTWX"):
-                    if use_precomputed_xtwx:
+                    if xtwx_precompute:
                         XTWX = torch.matmul(weights, XTWX_features).reshape(num_ts_X, B, ex1, ex1)
                     else:
                         XTWX = torch.einsum("xli,xbl,xlj->xbij", Xint, weights, Xint)
@@ -836,9 +872,12 @@ class PairwiseCCM:
 
                 # XTWy: (nX, B, Ex1, nY, Ey) -> flatten to (nX, B, Ex1, nY*Ey)
                 with time_block(self.logger, self.device, timings, "XTWy"):
-                    weighted_design = weighted_design_buf if B == sample_batch_size else weighted_design_tail_buf
-                    torch.mul(weights.unsqueeze(-2), Xint_t.unsqueeze(1), out=weighted_design)
-                    XTWy = torch.matmul(weighted_design, Yc_flat)
+                    if xtwy_precompute:
+                        XTWy = torch.matmul(weights, XTWy_features).reshape(num_ts_X, B, ex1, num_ts_Y * max_E_Y)
+                    else:
+                        weighted_design = weighted_design_buf if B == sample_batch_size else weighted_design_tail_buf
+                        torch.mul(weights.unsqueeze(-2), Xint_t.unsqueeze(1), out=weighted_design)
+                        XTWy = torch.matmul(weighted_design, Yc_flat)
 
                 with time_block(self.logger, self.device, timings, "cholesky"):
                     Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)

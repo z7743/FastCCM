@@ -11,6 +11,29 @@ class MicrosecondFormatter(logging.Formatter):
         return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+class TqdmStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            try:
+                from .runtime import tqdm
+            except Exception:  # pragma: no cover
+                tqdm = None
+
+            if tqdm is None:
+                stream = self.stream
+                stream.write(msg + self.terminator)
+                self.flush()
+                return
+
+            tqdm.write(msg, file=self.stream)
+            self.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+
 def setup_logger(name: str, verbose: int = 0, log_file: str = None) -> logging.Logger:
     """
     verbose:
@@ -35,7 +58,7 @@ def setup_logger(name: str, verbose: int = 0, log_file: str = None) -> logging.L
             datefmt="%Y-%m-%d %H:%M:%S.%f",
         )
 
-        handler = logging.StreamHandler(sys.stderr) if log_file is None else logging.FileHandler(log_file)
+        handler = TqdmStreamHandler(sys.stderr) if log_file is None else logging.FileHandler(log_file)
         handler.setLevel(level)
         handler.setFormatter(fmt)
         logger.addHandler(handler)

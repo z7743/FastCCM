@@ -11,17 +11,17 @@ CCM matrix timings (E=5, exclusion window=5)
 
 | Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
 |---|---:|---:|
-| 100×100, T=1000 | 0.245 | 0.738 |
-| 200×200, T=1000 | 0.566 | 1.859 |
-| 100×100, T=5000 | 3.186 | 12.930 |
+| 100×100, T=1000 | 0.245 | 0.744 |
+| 200×200, T=1000 | 0.566 | 1.870 |
+| 100×100, T=5000 | 3.186 | 12.670 |
 
 Single time series timings (E=20, exclusion window=10)
 
 | Condition | Simplex projection (s) | S-MAP projection (s) |
 |---|---:|---:|
-| T=2000 | 0.008 | 0.043 |
-| T=8000 | 0.097 | 0.421 |
-| T=32000 | 1.448 | 6.804 |
+| T=2000 | 0.008 | 0.016 |
+| T=8000 | 0.097 | 0.192 |
+| T=32000 | 1.448 | 2.904 |
 
 ## Installation
 
@@ -62,7 +62,9 @@ import numpy as np
 Specify the device to use (e.g., "cpu" or "cuda"):
 
 ```python
-ccm = PairwiseCCM(device="cpu")
+ccm = PairwiseCCM(
+    device="cpu",
+)
 ```
 
 3. Generate Data
