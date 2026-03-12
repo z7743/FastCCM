@@ -34,6 +34,12 @@ class Functions:
             log_file=log_file,
         )
 
+    def _common_length(self, *series_groups):
+        return min(arr.shape[0] for group in series_groups for arr in group)
+
+    def _suffix_aligned(self, series_group, length):
+        return [arr[-length:] for arr in series_group]
+
     def _make_out_array(self, shape, dtype=np.float32, out_path=None, fill_value=np.nan, order="C"):
         """
         """
@@ -129,6 +135,10 @@ class Functions:
         if Y_emb is None:
             Y_emb = X_emb
 
+        min_len = self._common_length(X_emb, Y_emb)
+        X_emb_aligned = self._suffix_aligned(X_emb, min_len)
+        Y_emb_aligned = self._suffix_aligned(Y_emb, min_len)
+
         nX, nY = len(X_emb), len(Y_emb)
         E_y_max = max(y.shape[-1] for y in Y_emb)
 
@@ -136,7 +146,7 @@ class Functions:
         #out = np.full((E_y_max, nY, nX), np.nan, dtype=np.float32)
 
         # Resolve sizes globally so each block uses identical sampling defaults
-        L_res, S_res = self._resolve_sizes_compute_(X_emb, Y_emb, library_size, sample_size, tp)
+        L_res, S_res = self._resolve_sizes_compute_(X_emb_aligned, Y_emb_aligned, library_size, sample_size, tp)
 
         out = self._make_out_array((E_y_max, nY, nX), dtype=out_dtype, out_path=out_path, fill_value=np.nan)
 
@@ -146,8 +156,8 @@ class Functions:
                 x1 = min(x0 + x_block, nX)
 
                 r_blk = self.ccm.score_matrix(
-                    X_emb[x0:x1],
-                    Y_emb[y0:y1],
+                    X_emb_aligned[x0:x1],
+                    Y_emb_aligned[y0:y1],
                     library_size=L_res,
                     sample_size=S_res,
                     exclusion_window=exclusion_window,
@@ -197,11 +207,15 @@ class Functions:
         if Y_lib_emb is None:
             Y_lib_emb = X_lib_emb
 
+        min_len_lib = self._common_length(X_lib_emb, Y_lib_emb)
+        X_lib_aligned = self._suffix_aligned(X_lib_emb, min_len_lib)
+        Y_lib_aligned = self._suffix_aligned(Y_lib_emb, min_len_lib)
+
         nX, nY = len(X_lib_emb), len(Y_lib_emb)
         E_y_max = max(y.shape[-1] for y in Y_lib_emb)
 
         # Resolve global library size and a global S_pred
-        L_res, S_pred = self._resolve_sizes_predict_(X_lib_emb, Y_lib_emb, X_pred_emb, library_size, tp)
+        L_res, S_pred = self._resolve_sizes_predict_(X_lib_aligned, Y_lib_aligned, X_pred_emb, library_size, tp)
 
         # Build a trimmed X_pred view so every block uses the same S_pred
         if X_pred_emb is None:
@@ -218,8 +232,8 @@ class Functions:
                 x1 = min(x0 + x_block, nX)
 
                 A_blk = self.ccm.predict_matrix(
-                    X_lib_emb[x0:x1],
-                    Y_lib_emb[y0:y1],
+                    X_lib_aligned[x0:x1],
+                    Y_lib_aligned[y0:y1],
                     X_pred_trimmed[x0:x1],
                     library_size=L_res,
                     exclusion_window=exclusion_window,
@@ -495,7 +509,7 @@ class Functions:
             {
             "E_range": array-like,                         # as provided
             "tau_range": array-like,                       # as provided
-            "tp_range": np.ndarray,                        # np.arange(1, tp_max)
+            "tp_range": np.ndarray,                        # np.arange(1, tp_max + 1)
             "result": np.ndarray,                          # shape: (tp_max, len(tau_range), len(E_range))
             "optimal_tau": int,                            # tau with highest mean over tp
             "optimal_E": int,                              # E with highest mean over tp
@@ -528,7 +542,7 @@ class Functions:
         return {
             "E_range": E_range,
             "tau_range": tau_range,
-            "tp_range": np.arange(1,tp_max),
+            "tp_range": np.arange(1, tp_max + 1),
             "result": res,
             "optimal_tau": tau_range[max_idx[0]],
             "optimal_E": E_range[max_idx[1]],
@@ -541,6 +555,13 @@ class Visualizer:
         Initializes the Visualizer class.
         """
         pass
+
+    def _palette(self, cmap, count):
+        if count <= 0:
+            return []
+        if count == 1:
+            return [cmap(0.5)]
+        return [cmap(0.2 + 0.6 * (i / (count - 1))) for i in range(count)]
 
     def plot_convergence_test(self, conv_test_res, X_idx=0, Y_idx=0, xscale="log", plot_means_only=False, ax=None):
         """
@@ -563,8 +584,8 @@ class Visualizer:
         num_dimensions_X = (np.isnan(Y_to_X_results).sum(axis=(0,1)) == 0).sum()
 
         # Generate color palettes dynamically based on the number of dimensions, avoiding light colors
-        colors_X_to_Y = [cm.gray(0.2 + 0.6 * (i / (num_dimensions_Y - 1))) for i in range(num_dimensions_Y)]
-        colors_Y_to_X = [cm.Reds(0.2 + 0.6 * (i / (num_dimensions_X - 1))) for i in range(num_dimensions_X)]
+        colors_X_to_Y = self._palette(cm.gray, num_dimensions_Y)
+        colors_Y_to_X = self._palette(cm.Reds, num_dimensions_X)
         
         if ax == None:  
             fig, ax = plt.subplots(figsize=(10, 6))
