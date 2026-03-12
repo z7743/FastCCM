@@ -90,94 +90,123 @@ def timings_summary(timings: dict, order=None):
     return " ".join(f"{k}={format_ms(timings[k])}" for k in keys if k in timings)
 
 
-def auto_batch_size_smap(X_lib, X_sample, Y_lib_s, *, dtype, compute_dtype, budget_gb=2.0):
+def _dtype_bytes(dtype: torch.dtype) -> int:
+    return torch.tensor([], dtype=dtype).element_size()
+
+
+def _shape_bytes(shape, itemsize: int) -> int:
+    return int(math.prod(int(dim) for dim in shape) * int(itemsize))
+
+
+def _resolve_batch_size(total_samples: int, budget_bytes: int, base_bytes: int, per_sample_bytes: int):
+    if total_samples <= 0:
+        return 0
+    if per_sample_bytes <= 0:
+        return min(int(total_samples), 1)
+
+    available_bytes = int(budget_bytes) - int(base_bytes)
+    if available_bytes <= 0:
+        return 1
+
+    batch_size = available_bytes // int(per_sample_bytes)
+    batch_size = max(1, int(batch_size))
+    batch_size = min(batch_size, int(total_samples))
+    return int(batch_size)
+
+
+def auto_batch_size_smap(
+    X_lib,
+    X_sample,
+    Y_lib_s,
+    *,
+    dtype,
+    compute_dtype,
+    budget_gb=2.0,
+    xtwx_precompute=True,
+    xtwy_precompute=False,
+):
     num_ts_X, L, max_E_X = X_lib.shape
     num_ts_Y, _, max_E_Y = Y_lib_s.shape
     S = X_sample.shape[1]
 
-    cbytes = torch.tensor([], dtype=compute_dtype).element_size()
-    dbytes = torch.tensor([], dtype=dtype).element_size()
+    cbytes = _dtype_bytes(compute_dtype)
     ex1 = int(max_E_X + 1)
     nX = int(num_ts_X)
     nY = int(num_ts_Y)
     Ey = int(max_E_Y)
     L = int(L)
-
-    per_sample_bytes = cbytes * (
-        nX * L +                  # dist
-        nX * L +                  # weights
-        nX * L +                  # w2
-        nX * L * int(max_E_X) +   # Xc
-        nY * L * Ey +             # Yc
-        nX * L +                  # onesL
-        nX * L * ex1 +            # Xint
-        nX * ex1 * ex1 +          # XTWX
-        nX * ex1 * nY * Ey +      # XTWy
-        nX * ex1 * ex1 +          # Lchol
-        nX * ex1 * nY * Ey +      # beta
-        nX * ex1 +                # Xq
-        nX * nY * Ey              # pred_flat
-    ) + dbytes * (nX * nY * Ey)   # output cast/store
-
-    per_sample_bytes = int(per_sample_bytes * 1.15)
     budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
 
-    if per_sample_bytes <= 0:
-        B = min(int(S), 1)
-        return B, {
-            "per_sample_bytes": int(per_sample_bytes),
-            "budget_bytes": int(budget_bytes),
-            "estimated_peak_bytes": int(B * max(per_sample_bytes, 0)),
-        }
+    base_bytes = cbytes * (
+        nX * L * max_E_X +  # Xc
+        nY * L * Ey +       # Yc
+        nX * L +            # onesL
+        nX * L * ex1 +      # Xint
+        nX * ex1 * L +      # Xint_t
+        L * nY * Ey         # Yc_flat
+    )
+    if xtwx_precompute:
+        base_bytes += cbytes * (nX * L * ex1 * ex1)
+    if xtwy_precompute:
+        base_bytes += cbytes * (nX * L * ex1 * nY * Ey)
 
-    B = budget_bytes // per_sample_bytes
-    if B < 1:
-        B = 1
-    if B > int(S):
-        B = int(S)
-    B = int(B)
+    local_weights_per_sample = cbytes * (nX * L)
+    weighted_design_per_sample = 0 if xtwy_precompute else cbytes * (nX * ex1 * L)
+    solve_per_sample = cbytes * (
+        2 * nX * ex1 * ex1 +
+        2 * nX * ex1 * nY * Ey +
+        nX * ex1 +
+        nX * nY * Ey
+    )
+    per_sample_bytes = int((local_weights_per_sample + weighted_design_per_sample + solve_per_sample) * 1.10)
+
+    B = _resolve_batch_size(int(S), budget_bytes, base_bytes, per_sample_bytes)
     return B, {
+        "base_bytes": int(base_bytes),
         "per_sample_bytes": int(per_sample_bytes),
         "budget_bytes": int(budget_bytes),
-        "estimated_peak_bytes": int(B * per_sample_bytes),
+        "estimated_peak_bytes": int(base_bytes + B * max(per_sample_bytes, 0)),
     }
 
 
-def auto_batch_size_simplex(X_lib, X_sample, Y_lib_s, nbrs_num_max, *, dtype, compute_dtype, budget_gb=2.0):
+def auto_batch_size_simplex(
+    X_lib,
+    X_sample,
+    Y_lib_s,
+    nbrs_num_max,
+    *,
+    dtype,
+    compute_dtype,
+    budget_gb=2.0,
+):
     num_ts_X, L, _ = X_lib.shape
     num_ts_Y, _, max_EY = Y_lib_s.shape
     S = X_sample.shape[1]
     nX, nY, Ey, K = int(num_ts_X), int(num_ts_Y), int(max_EY), int(nbrs_num_max)
 
-    cbytes = torch.tensor([], dtype=compute_dtype).element_size()
-    dbytes = torch.tensor([], dtype=dtype).element_size()
+    cbytes = _dtype_bytes(compute_dtype)
+    dbytes = _dtype_bytes(dtype)
     ibytes = 8  # int64 indices
-
-    cdist_per_sample = cbytes * (nX * L)
-    knn_per_sample = (dbytes + ibytes) * (nX * K)
-    core_5d_per_sample = cbytes * (3 * K * Ey * nY * nX)
-    out_per_sample = dbytes * (Ey * nY * nX)
-    per_sample_bytes = int(cdist_per_sample + knn_per_sample + core_5d_per_sample + out_per_sample)
-
     budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
-    if per_sample_bytes <= 0:
-        B = min(int(S), 1)
-        return B, {
-            "per_sample_bytes": int(per_sample_bytes),
-            "budget_bytes": int(budget_bytes),
-            "estimated_peak_bytes": int(B * max(per_sample_bytes, 0)),
-        }
 
-    B = budget_bytes // per_sample_bytes
-    if B < 1:
-        B = 1
-    if B > int(S):
-        B = int(S)
-    B = int(B)
+    base_bytes = cbytes * (L * nY * Ey)  # Y_lib_lne
+
+    search_per_sample = (
+        cbytes * (nX * L + nX * K) +
+        (dbytes + ibytes) * (nX * K)
+    )
+    reduce_per_sample = (
+        cbytes * (nX * K * nY * Ey + nX * nY * Ey) +
+        dbytes * (nX * nY * Ey)
+    )
+    per_sample_bytes = int(max(search_per_sample, reduce_per_sample) * 1.10)
+
+    B = _resolve_batch_size(int(S), budget_bytes, base_bytes, per_sample_bytes)
     return B, {
+        "base_bytes": int(base_bytes),
         "per_sample_bytes": int(per_sample_bytes),
         "budget_bytes": int(budget_bytes),
-        "estimated_peak_bytes": int(B * per_sample_bytes),
+        "estimated_peak_bytes": int(base_bytes + B * max(per_sample_bytes, 0)),
     }
 
 

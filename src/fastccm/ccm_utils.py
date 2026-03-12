@@ -15,7 +15,7 @@ class Functions:
         device="cpu",
         dtype="float32",
         compute_dtype="float32",
-        memory_budget_gb=2.0,
+        memory_budget_gb=1.0,
         verbose=0,
         log_file=None,
     ):

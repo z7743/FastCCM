@@ -67,7 +67,7 @@ class PairwiseCCM:
     """
 
     def __init__(self,device = "cpu", dtype="float32", compute_dtype=None,
-                 verbose = 0, log_file = None, memory_budget_gb=2.0):
+                 verbose = 0, log_file = None, memory_budget_gb=1.0):
         """
         Create a PairwiseCCM instance.
 
@@ -83,7 +83,7 @@ class PairwiseCCM:
         compute_dtype : torch.dtype or str or None, default None
             Math-ops dtype used for heavy linear algebra (e.g., distances, solves).
             If None, uses the same value as `dtype`. 
-        memory_budget_gb : float, default 2.0
+        memory_budget_gb : float, default 1.0
             Memory budget (GB) used by automatic batching (`batch_size="auto"`).
             Larger values increase batch size and speed, but use more memory.
         """
@@ -200,7 +200,8 @@ class PairwiseCCM:
             SMAP normal matrices (`X^T W X`). Default is True.
         xtwy_precompute : bool, optional (smap only)
             Whether to precompute the per-library cross terms used to form SMAP
-            right-hand sides (`X^T W y`). Default is False.
+            right-hand sides (`X^T W y`). This is usually most beneficial for
+            single time series or small source/target matrices. Default is False.
 
         Returns
         -------
@@ -323,7 +324,8 @@ class PairwiseCCM:
             SMAP normal matrices (`X^T W X`). Default is True.
         xtwy_precompute : bool, optional (smap only)
             Whether to precompute the per-library cross terms used to form SMAP
-            right-hand sides (`X^T W y`). Default is False.
+            right-hand sides (`X^T W y`). This is usually most beneficial for
+            single time series or small source/target matrices. Default is False.
 
         Returns
         -------
@@ -540,37 +542,49 @@ class PairwiseCCM:
             Y_smp_s  = None
 
         # ---------- 6) method call ----------
+        return_pred = (Y_smp_s is None)
         if method == "simplex":
             auto_batch = (batch_size == "auto")
             nbrs_num_max = nbrs_num.max().item()
             total_samples = int(X_sample.shape[1])
             if auto_batch:
                 batch_size, batch_auto_meta = auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max,
+                    dtype=self.dtype,
+                    compute_dtype=self.compute_dtype,
+                    budget_gb=self.memory_budget_gb,
                 )
             else:
                 _, batch_auto_meta = auto_batch_size_simplex(
-                    X_lib, X_sample, Y_lib_s, nbrs_num_max, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
+                    X_lib, X_sample, Y_lib_s, nbrs_num_max,
+                    dtype=self.dtype,
+                    compute_dtype=self.compute_dtype,
+                    budget_gb=self.memory_budget_gb,
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
+            selected_batch_size = total_samples if batch_size is None else int(batch_size)
+            selected_peak_bytes = batch_auto_meta["estimated_peak_bytes"] if auto_batch else (
+                batch_auto_meta["base_bytes"] + selected_batch_size * max(batch_auto_meta["per_sample_bytes"], 0)
+            )
             self.logger.info(
-                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
+                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s base_est=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
                 "auto" if auto_batch else ("all-at-once" if batch_size is None else "manual"),
                 total_samples,
-                total_samples if batch_size is None else int(batch_size),
-                max(1, int(math.ceil(total_samples / max(total_samples if batch_size is None else int(batch_size), 1)))),
-                str((total_samples if batch_size is None else int(batch_size)) < total_samples),
+                selected_batch_size,
+                max(1, int(math.ceil(total_samples / max(selected_batch_size, 1)))),
+                str(selected_batch_size < total_samples),
+                format_bytes(batch_auto_meta["base_bytes"]),
                 format_bytes(batch_auto_meta["per_sample_bytes"]),
                 format_bytes(batch_auto_meta["budget_bytes"]),
-                format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
+                format_bytes(selected_peak_bytes),
             )
 
             out = self.__simplex_prediction(
                 lib_indices, smpl_indices,
                 X_lib, X_sample, Y_lib_s, Y_smp_s,
                 exclusion_window, nbrs_num, metric_fn=metric_fn,
-                return_pred=(Y_smp_s is None), sample_batch_size=batch_size,
+                return_pred=return_pred, sample_batch_size=batch_size,
                 nbrs_num_max=int(nbrs_num_max),
             )
 
@@ -580,24 +594,39 @@ class PairwiseCCM:
             total_samples = int(X_sample.shape[1])
             if auto_batch:
                 batch_size, batch_auto_meta = auto_batch_size_smap(
-                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
+                    X_lib, X_sample, Y_lib_s,
+                    dtype=self.dtype,
+                    compute_dtype=self.compute_dtype,
+                    budget_gb=self.memory_budget_gb,
+                    xtwx_precompute=xtwx_precompute,
+                    xtwy_precompute=xtwy_precompute,
                 )
             else:
                 _, batch_auto_meta = auto_batch_size_smap(
-                    X_lib, X_sample, Y_lib_s, dtype=self.dtype, compute_dtype=self.compute_dtype, budget_gb=self.memory_budget_gb
+                    X_lib, X_sample, Y_lib_s,
+                    dtype=self.dtype,
+                    compute_dtype=self.compute_dtype,
+                    budget_gb=self.memory_budget_gb,
+                    xtwx_precompute=xtwx_precompute,
+                    xtwy_precompute=xtwy_precompute,
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
+            selected_batch_size = total_samples if batch_size is None else int(batch_size)
+            selected_peak_bytes = batch_auto_meta["estimated_peak_bytes"] if auto_batch else (
+                batch_auto_meta["base_bytes"] + selected_batch_size * max(batch_auto_meta["per_sample_bytes"], 0)
+            )
             self.logger.info(
-                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
+                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s base_est=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
                 "auto" if auto_batch else ("all-at-once" if batch_size is None else "manual"),
                 total_samples,
-                total_samples if batch_size is None else int(batch_size),
-                max(1, int(math.ceil(total_samples / max(total_samples if batch_size is None else int(batch_size), 1)))),
-                str((total_samples if batch_size is None else int(batch_size)) < total_samples),
+                selected_batch_size,
+                max(1, int(math.ceil(total_samples / max(selected_batch_size, 1)))),
+                str(selected_batch_size < total_samples),
+                format_bytes(batch_auto_meta["base_bytes"]),
                 format_bytes(batch_auto_meta["per_sample_bytes"]),
                 format_bytes(batch_auto_meta["budget_bytes"]),
-                format_bytes((total_samples if batch_size is None else int(batch_size)) * max(batch_auto_meta["per_sample_bytes"], 0)),
+                format_bytes(selected_peak_bytes),
             )
             self.logger.info(
                 "SMAP config theta=%s ridge=%s xtwx_precompute=%s xtwy_precompute=%s",
@@ -612,7 +641,7 @@ class PairwiseCCM:
                 lib_indices, smpl_indices,
                 X_lib, X_sample, Y_lib_s, Y_smp_s,
                 exclusion_window, theta, metric_fn=metric_fn,
-                return_pred=(Y_smp_s is None),
+                return_pred=return_pred,
                 sample_batch_size=batch_size,
                 ridge=ridge,
                 xtwx_precompute=xtwx_precompute,
