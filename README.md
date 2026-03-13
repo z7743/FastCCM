@@ -11,17 +11,19 @@ CCM matrix timings (E=5, exclusion window=5)
 
 | Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
 |---|---:|---:|
-| 100×100, T=1000 | 0.245 | 0.744 |
-| 200×200, T=1000 | 0.566 | 1.870 |
-| 100×100, T=5000 | 3.186 | 12.670 |
+| 100×100, T=1000 | 0.237 | 0.760 |
+| 200×200, T=1000 | 0.561 | 1.879 |
+| 800×800, T=500 | 2.096 | 6.866 |
+| 100×100, T=8000 | 6.947 | 30.381 |
 
 Single time series timings (E=20, exclusion window=10)
 
 | Condition | Simplex projection (s) | S-MAP projection (s) |
 |---|---:|---:|
 | T=2000 | 0.008 | 0.016 |
-| T=8000 | 0.097 | 0.192 |
-| T=32000 | 1.448 | 2.904 |
+| T=8000 | 0.097 | 0.193 |
+| T=32000 | 1.479 | 2.929 |
+| T=128000 | 23.771 | 47.008 |
 
 ## Installation
 
