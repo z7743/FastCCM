@@ -262,7 +262,7 @@ class Functions:
             exclusion_window=0, 
             tp=0, 
             method="simplex",
-            trials=10, 
+            trials=3, 
             seed=None, 
             metric="corr",
             **kwargs
@@ -459,7 +459,7 @@ class Functions:
             tau_range=np.arange(1,10,1), 
             tp_max=1,  
             method="simplex", 
-            trials=10, 
+            trials=3, 
             seed=None,
             metric="corr",
             **kwargs
