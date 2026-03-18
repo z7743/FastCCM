@@ -92,7 +92,6 @@ class PairwiseCCM:
         self.dtype = _resolve_dtype(dtype) or torch.float32
         self.compute_dtype = _resolve_dtype(compute_dtype) or self.dtype
         self.memory_budget_gb = float(memory_budget_gb)
-        self._simplex_exclusion_offsets = {}
 
         # (Optional) sanity: ensure float type
         if not (self.dtype.is_floating_point and self.compute_dtype.is_floating_point):
@@ -1066,33 +1065,6 @@ class PairwiseCCM:
 
         return X_buf
 
-    def __get_simplex_exclusion_offsets(self, exclusion_rad):
-        radius = int(exclusion_rad)
-        offsets = self._simplex_exclusion_offsets.get(radius)
-        if offsets is None or offsets.device != torch.device(self.device):
-            offsets = torch.arange(-radius, radius + 1, device=self.device)
-            self._simplex_exclusion_offsets[radius] = offsets
-        return offsets
-
-    def __apply_simplex_exclusion_(self, dist, sample_idx, exclusion_rad):
-        radius = int(exclusion_rad)
-        if radius < 0:
-            return
-
-        library_size = int(dist.shape[2])
-        batch_size = int(sample_idx.shape[0])
-        offsets = self.__get_simplex_exclusion_offsets(radius)
-        invalid = sample_idx.to(device=dist.device, dtype=torch.long).unsqueeze(1) + offsets.unsqueeze(0)
-        valid = (invalid >= 0) & (invalid < library_size)
-        invalid.clamp_(0, library_size - 1)
-
-        batch_idx = torch.arange(batch_size, device=dist.device).unsqueeze(1)
-        if bool(valid.all()):
-            dist[:, batch_idx, invalid] = float("inf")
-        else:
-            batch_idx = batch_idx.expand_as(invalid)
-            dist[:, batch_idx[valid], invalid[valid]] = float("inf")
-
     def __get_nbrs_indices_with_weights(
         self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad
     ):
@@ -1110,7 +1082,11 @@ class PairwiseCCM:
                 near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
         else:
             with time_block(self.logger, self.device, timings, "select"):
-                self.__apply_simplex_exclusion_(dist, sample_idx, exclusion_rad)
+                allowed = (
+                    (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
+                    (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
+                )
+                dist.masked_fill_(~allowed.unsqueeze(0), float("inf"))
                 near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
 
         with time_block(self.logger, self.device, timings, "weights"):
