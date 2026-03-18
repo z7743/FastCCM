@@ -92,6 +92,7 @@ class PairwiseCCM:
         self.dtype = _resolve_dtype(dtype) or torch.float32
         self.compute_dtype = _resolve_dtype(compute_dtype) or self.dtype
         self.memory_budget_gb = float(memory_budget_gb)
+        self._simplex_exclusion_offsets = {}
 
         # (Optional) sanity: ensure float type
         if not (self.dtype.is_floating_point and self.compute_dtype.is_floating_point):
@@ -728,8 +729,11 @@ class PairwiseCCM:
 
         # Keep full output off accelerator in score mode so device memory tracks batch size.
         out_device = self.device if ((Y_sample_shifted is None) and return_pred) else "cpu"
-        # Prepare library targets once; doing this inside the loop dominates "gather" time.
-        Y_lib_lne = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2).contiguous()
+        # Flatten target features once so per-batch gathers can use index_select on a
+        # dense 2D table instead of slower advanced indexing over a 3D tensor.
+        Y_lib_flat = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2).reshape(
+            X_lib.shape[1], num_ts_Y * max_E_Y
+        ).contiguous()
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
         A = None if stream_kind is not None else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "simplex batches"):
@@ -755,24 +759,29 @@ class PairwiseCCM:
                     hard_clear(self.logger, self.device)
                 raise
 
-            I = indices
-
             weights_c = weights.to(self.compute_dtype)
+            batch_queries = s1 - s0
+            flat_indices = indices.reshape(-1)
+            weights_rows = weights_c.reshape(num_ts_X * batch_queries, 1, nbrs_num_max)
             gather_ms = 0.0
             weighted_avg_ms = 0.0
             metric_ms = 0.0
             store_ms = 0.0
             for y0 in range(0, num_ts_Y, target_batch_size):
                 y1 = min(num_ts_Y, y0 + target_batch_size)
+                y_width = (y1 - y0) * max_E_Y
 
                 t_part = tic(self.logger, self.device) if self._debug_enabled() else None
-                Y_idx = Y_lib_lne[:, y0:y1, :][I]
-                Y_lib_shifted_indexed = Y_idx.reshape(num_ts_X, s1 - s0, nbrs_num_max, y1 - y0, max_E_Y)
+                Y_idx = torch.index_select(
+                    Y_lib_flat[:, y0 * max_E_Y:y1 * max_E_Y],
+                    0,
+                    flat_indices,
+                ).reshape(num_ts_X * batch_queries, nbrs_num_max, y_width)
                 if t_part is not None:
                     gather_ms += toc_ms(self.logger, self.device, t_part)
 
                 t_part = tic(self.logger, self.device) if self._debug_enabled() else None
-                A_y = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
+                A_y = torch.bmm(weights_rows, Y_idx).reshape(num_ts_X, batch_queries, y1 - y0, max_E_Y)
                 A_y = A_y.permute(1, 3, 2, 0).contiguous()  # (B, E_y, y_blk, n_X)
                 if t_part is not None:
                     weighted_avg_ms += toc_ms(self.logger, self.device, t_part)
@@ -798,7 +807,7 @@ class PairwiseCCM:
                     if t_part is not None:
                         store_ms += toc_ms(self.logger, self.device, t_part)
 
-                del Y_idx, Y_lib_shifted_indexed, A_y
+                del Y_idx, A_y
 
             if self._debug_enabled():
                 timings["gather"] = gather_ms
@@ -820,7 +829,7 @@ class PairwiseCCM:
                     ),
                 )
 
-            del weights, indices, I, weights_c
+            del weights, indices, weights_c, flat_indices, weights_rows
 
         if stream_kind is not None:
             return stream_metric_state_finalize(stream_kind, stream_state)
@@ -1057,6 +1066,33 @@ class PairwiseCCM:
 
         return X_buf
 
+    def __get_simplex_exclusion_offsets(self, exclusion_rad):
+        radius = int(exclusion_rad)
+        offsets = self._simplex_exclusion_offsets.get(radius)
+        if offsets is None or offsets.device != torch.device(self.device):
+            offsets = torch.arange(-radius, radius + 1, device=self.device)
+            self._simplex_exclusion_offsets[radius] = offsets
+        return offsets
+
+    def __apply_simplex_exclusion_(self, dist, sample_idx, exclusion_rad):
+        radius = int(exclusion_rad)
+        if radius < 0:
+            return
+
+        library_size = int(dist.shape[2])
+        batch_size = int(sample_idx.shape[0])
+        offsets = self.__get_simplex_exclusion_offsets(radius)
+        invalid = sample_idx.to(device=dist.device, dtype=torch.long).unsqueeze(1) + offsets.unsqueeze(0)
+        valid = (invalid >= 0) & (invalid < library_size)
+        invalid.clamp_(0, library_size - 1)
+
+        batch_idx = torch.arange(batch_size, device=dist.device).unsqueeze(1)
+        if bool(valid.all()):
+            dist[:, batch_idx, invalid] = float("inf")
+        else:
+            batch_idx = batch_idx.expand_as(invalid)
+            dist[:, batch_idx[valid], invalid[valid]] = float("inf")
+
     def __get_nbrs_indices_with_weights(
         self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad
     ):
@@ -1074,13 +1110,7 @@ class PairwiseCCM:
                 near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
         else:
             with time_block(self.logger, self.device, timings, "select"):
-                #allowed = torch.abs(lib_idx[None, :] - sample_idx[:, None]) > exclusion_rad  # (S_blk, L)
-                allowed = (
-                    (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
-                    (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
-                ) 
-                #dist = dist.masked_fill(~allowed.unsqueeze(0), float("inf"))
-                dist.masked_fill_(~allowed.unsqueeze(0), float("inf"))
+                self.__apply_simplex_exclusion_(dist, sample_idx, exclusion_rad)
                 near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
 
         with time_block(self.logger, self.device, timings, "weights"):
