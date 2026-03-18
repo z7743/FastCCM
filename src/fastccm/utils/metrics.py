@@ -165,28 +165,32 @@ def stream_metric_state_init(kind: str, D, Y, X, *, device, dtype):
     raise ValueError(f"Unsupported streaming metric kind: {kind}")
 
 
-def stream_metric_state_update(kind: str, state, A_blk, B_blk):
-    state["n"] += int(A_blk.shape[0])
+def stream_metric_state_update(kind: str, state, A_blk, B_blk, *, y_start: int = 0, count_samples: bool = True):
+    if count_samples:
+        state["n"] += int(A_blk.shape[0])
+    y_stop = int(y_start + A_blk.shape[2])
+    dyx = (slice(None), slice(int(y_start), y_stop), slice(None))
+    yx = (slice(int(y_start), y_stop), slice(None))
 
     if kind == "corr":
-        state["sumA"] += A_blk.sum(dim=0)
-        state["sumB"] += B_blk.sum(dim=0)
-        state["sumAA"] += (A_blk * A_blk).sum(dim=0)
-        state["sumBB"] += (B_blk * B_blk).sum(dim=0)
-        state["sumAB"] += (A_blk * B_blk).sum(dim=0)
+        state["sumA"][dyx] += A_blk.sum(dim=0)
+        state["sumB"][dyx] += B_blk.sum(dim=0)
+        state["sumAA"][dyx] += (A_blk * A_blk).sum(dim=0)
+        state["sumBB"][dyx] += (B_blk * B_blk).sum(dim=0)
+        state["sumAB"][dyx] += (A_blk * B_blk).sum(dim=0)
         return
     if kind in ("mse", "rmse"):
         d = A_blk - B_blk
-        state["sum_sq_err"] += (d * d).sum(dim=0)
+        state["sum_sq_err"][dyx] += (d * d).sum(dim=0)
         return
     if kind == "mae":
-        state["sum_abs_err"] += (A_blk - B_blk).abs().sum(dim=0)
+        state["sum_abs_err"][dyx] += (A_blk - B_blk).abs().sum(dim=0)
         return
     if kind == "neg_nrmse":
         d = A_blk - B_blk
-        state["sum_sq_err_sd"] += (d * d).sum(dim=(0, 1))
-        state["sumB_sd"] += B_blk.sum(dim=(0, 1))
-        state["sumBB_sd"] += (B_blk * B_blk).sum(dim=(0, 1))
+        state["sum_sq_err_sd"][yx] += (d * d).sum(dim=(0, 1))
+        state["sumB_sd"][yx] += B_blk.sum(dim=(0, 1))
+        state["sumBB_sd"][yx] += (B_blk * B_blk).sum(dim=(0, 1))
         return
     raise ValueError(f"Unsupported streaming metric kind: {kind}")
 
@@ -221,4 +225,3 @@ def stream_metric_state_finalize(kind: str, state, *, eps=1e-12, neg_nrmse_T=0.5
         out = torch.exp(-((1.0 / T_t) * torch.pow(rmse / (rmse_base + eps_t), 2)))
         return out.unsqueeze(0).to(dtype=dtype)
     raise ValueError(f"Unsupported streaming metric kind: {kind}")
-

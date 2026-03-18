@@ -23,6 +23,7 @@ from .utils.runtime import (
     smap_xtwx_precompute_bytes,
     smap_xtwy_precompute_bytes,
     batch_starts,
+    resolve_simplex_target_batch_size,
 )
 from .utils.logger import setup_logger
 import math
@@ -190,6 +191,12 @@ class PairwiseCCM:
         nbrs_num : int or list[int], optional (simplex only)
             Number of neighbors per source series. If int, the same k is used for all.
             Default is E_x + 1 for each source series.
+        target_batch_size : {int, None, "calibrated"}, optional (simplex only)
+            Number of target series (`n_Y`) processed per simplex reduction chunk.
+            `None` keeps the original all-targets-at-once path, while
+            `"calibrated"` applies a deterministic offline-calibrated policy.
+            When `batch_size="auto"` and this argument is omitted, the
+            calibrated policy is used automatically.
         theta : float, optional (smap only)
             Local weighting strength; larger values induce steeper locality.
             Default is 1.0.
@@ -314,6 +321,12 @@ class PairwiseCCM:
         nbrs_num : int or list[int], optional (simplex only)
             Number of neighbors per source series. If int, the same k is used for all.
             Default is E_x + 1 for each source series.
+        target_batch_size : {int, None, "calibrated"}, optional (simplex only)
+            Number of target series (`n_Y`) processed per simplex reduction chunk.
+            `None` keeps the original all-targets-at-once path, while
+            `"calibrated"` applies a deterministic offline-calibrated policy.
+            When `batch_size="auto"` and this argument is omitted, the
+            calibrated policy is used automatically.
         theta : float, optional (smap only)
             Local weighting strength; larger values induce steeper locality.
             Default is 1.0.
@@ -404,6 +417,7 @@ class PairwiseCCM:
         max_E_X = torch.tensor([X_lib_list[i].shape[-1] for i in range(num_ts_X)], device=self.device).max().item()
         max_E_Y = torch.tensor([Y_lib_list[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
 
+        predict_output_bytes = 0
         if mode == "score":
             min_len = min(
                 min(y.shape[0] for y in Y_lib_list),
@@ -445,6 +459,15 @@ class PairwiseCCM:
                         else torch.tensor(nbrs_num, device=self.device)
             else:
                 nbrs_num = torch.tensor([X_lib_list[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
+            target_batch_size_provided = "target_batch_size" in kwargs
+            target_batch_size = kwargs.get("target_batch_size")
+            if isinstance(target_batch_size, str):
+                if target_batch_size != "calibrated":
+                    raise ValueError("target_batch_size must be a positive int, None, or 'calibrated'.")
+            elif target_batch_size is not None:
+                target_batch_size = int(target_batch_size)
+                if target_batch_size <= 0:
+                    raise ValueError("target_batch_size must be positive, None, or 'calibrated'.")
         elif method == "smap":
             ridge = kwargs.get("ridge", 0.0)
             theta = kwargs.get("theta", 1.0)
@@ -506,6 +529,7 @@ class PairwiseCCM:
                 pred_shape[0] * pred_shape[1] * pred_shape[2] * pred_shape[3]
                 * torch.tensor([], dtype=self.dtype).element_size()
             )
+            predict_output_bytes = pred_bytes
             self.logger.warning(
                 "Predict final tensor allocation shape=%s dtype=%s approx=%s on device=%s (before CPU/NumPy transfer).",
                 str(pred_shape),
@@ -547,12 +571,21 @@ class PairwiseCCM:
             auto_batch = (batch_size == "auto")
             nbrs_num_max = nbrs_num.max().item()
             total_samples = int(X_sample.shape[1])
+            simplex_extra_base_bytes = 0
+            if mode == "score":
+                simplex_extra_base_bytes = int(Y_smp_s.numel() * torch.tensor([], dtype=self.dtype).element_size())
+            else:
+                simplex_extra_base_bytes = int(predict_output_bytes)
+            if auto_batch and (not target_batch_size_provided):
+                target_batch_size = "calibrated"
             if auto_batch:
                 batch_size, batch_auto_meta = auto_batch_size_simplex(
                     X_lib, X_sample, Y_lib_s, nbrs_num_max,
                     dtype=self.dtype,
                     compute_dtype=self.compute_dtype,
                     budget_gb=self.memory_budget_gb,
+                    target_batch_size=target_batch_size,
+                    extra_base_bytes=simplex_extra_base_bytes,
                 )
             else:
                 _, batch_auto_meta = auto_batch_size_simplex(
@@ -560,32 +593,37 @@ class PairwiseCCM:
                     dtype=self.dtype,
                     compute_dtype=self.compute_dtype,
                     budget_gb=self.memory_budget_gb,
+                    target_batch_size=target_batch_size,
+                    extra_base_bytes=simplex_extra_base_bytes,
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
             selected_batch_size = total_samples if batch_size is None else int(batch_size)
+            selected_target_batch_size = int(batch_auto_meta["target_batch_size"])
             selected_peak_bytes = batch_auto_meta["estimated_peak_bytes"] if auto_batch else (
                 batch_auto_meta["base_bytes"] + selected_batch_size * max(batch_auto_meta["per_sample_bytes"], 0)
             )
             self.logger.info(
-                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s base_est=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
+                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s target_batch_size=%d target_split=%s base_est=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
                 "auto" if auto_batch else ("all-at-once" if batch_size is None else "manual"),
                 total_samples,
                 selected_batch_size,
                 max(1, int(math.ceil(total_samples / max(selected_batch_size, 1)))),
                 str(selected_batch_size < total_samples),
+                selected_target_batch_size,
+                str(selected_target_batch_size < int(Y_lib_s.shape[0])),
                 format_bytes(batch_auto_meta["base_bytes"]),
                 format_bytes(batch_auto_meta["per_sample_bytes"]),
                 format_bytes(batch_auto_meta["budget_bytes"]),
                 format_bytes(selected_peak_bytes),
             )
-
             out = self.__simplex_prediction(
                 lib_indices, smpl_indices,
                 X_lib, X_sample, Y_lib_s, Y_smp_s,
                 exclusion_window, nbrs_num, metric_fn=metric_fn,
                 return_pred=return_pred, sample_batch_size=batch_size,
                 nbrs_num_max=int(nbrs_num_max),
+                target_batch_size=selected_target_batch_size,
             )
 
 
@@ -655,7 +693,7 @@ class PairwiseCCM:
     def __simplex_prediction(self, lib_indices, smpl_indices,
                               X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, 
                               exclusion_rad, nbrs_num, metric_fn, return_pred=False, sample_batch_size=None,
-                              nbrs_num_max=None):
+                              nbrs_num_max=None, target_batch_size=None):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
@@ -663,11 +701,12 @@ class PairwiseCCM:
 
         if (sample_batch_size is None) or (sample_batch_size >= subsample_size):
             sample_batch_size = subsample_size
+        target_batch_size = resolve_simplex_target_batch_size(num_ts_Y, target_batch_size)
 
         if nbrs_num_max is None:
             nbrs_num_max = int(nbrs_num.max().item())
         self.logger.debug(
-            "Entering simplex backend (queries=%d, library_points=%d, num_sources=%d, num_targets=%d, Ey=%d, nbrs_max=%d, batch_size=%d, num_batches=%d, exclusion=%s)",
+            "Entering simplex backend (queries=%d, library_points=%d, num_sources=%d, num_targets=%d, Ey=%d, nbrs_max=%d, batch_size=%d, num_batches=%d, target_batch_size=%d, num_target_batches=%d, exclusion=%s)",
             int(subsample_size),
             int(X_lib.shape[1]),
             int(num_ts_X),
@@ -676,6 +715,8 @@ class PairwiseCCM:
             int(nbrs_num_max),
             int(sample_batch_size),
             int(math.ceil(subsample_size / sample_batch_size)),
+            int(target_batch_size),
+            int(math.ceil(num_ts_Y / target_batch_size)),
             str(exclusion_rad),
         )
         stream_kind = get_streaming_metric_kind(metric_fn) if (not return_pred) else None
@@ -717,34 +758,55 @@ class PairwiseCCM:
             I = indices
 
             weights_c = weights.to(self.compute_dtype)
+            gather_ms = 0.0
+            weighted_avg_ms = 0.0
+            metric_ms = 0.0
+            store_ms = 0.0
+            for y0 in range(0, num_ts_Y, target_batch_size):
+                y1 = min(num_ts_Y, y0 + target_batch_size)
 
-            with time_block(self.logger, self.device, timings, "gather"):
-                Y_idx = Y_lib_lne[I]
-                Y_lib_shifted_indexed = Y_idx.reshape(num_ts_X, s1 - s0, nbrs_num_max, num_ts_Y, max_E_Y)
+                t_part = tic(self.logger, self.device) if self._debug_enabled() else None
+                Y_idx = Y_lib_lne[:, y0:y1, :][I]
+                Y_lib_shifted_indexed = Y_idx.reshape(num_ts_X, s1 - s0, nbrs_num_max, y1 - y0, max_E_Y)
+                if t_part is not None:
+                    gather_ms += toc_ms(self.logger, self.device, t_part)
 
-            with time_block(self.logger, self.device, timings, "weighted_avg"):
-                A_blk = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
+                t_part = tic(self.logger, self.device) if self._debug_enabled() else None
+                A_y = torch.einsum("xbk,xbkye->xbye", weights_c, Y_lib_shifted_indexed)
+                A_y = A_y.permute(1, 3, 2, 0).contiguous()  # (B, E_y, y_blk, n_X)
+                if t_part is not None:
+                    weighted_avg_ms += toc_ms(self.logger, self.device, t_part)
 
-                #A_blk = torch.matmul(
-                #    weights_c.unsqueeze(2),
-                #    Y_lib_shifted_indexed.reshape(num_ts_X, s1 - s0, nbrs_num_max, num_ts_Y * max_E_Y),
-                #).reshape(num_ts_X, s1 - s0, num_ts_Y, max_E_Y)
-                A_blk = A_blk.permute(1, 3, 2, 0).contiguous()  # (B, E_y, n_Y, n_X)
-
-            if stream_kind is not None:
-                with time_block(self.logger, self.device, timings, "metric"):
-                    B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
-                        .expand(s1 - s0, max_E_Y, num_ts_Y, num_ts_X)
+                if stream_kind is not None:
+                    t_part = tic(self.logger, self.device) if self._debug_enabled() else None
+                    B_y = torch.permute(Y_sample_shifted[y0:y1, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
+                        .expand(s1 - s0, max_E_Y, y1 - y0, num_ts_X)
                     stream_metric_state_update(
                         stream_kind,
                         stream_state,
-                        A_blk.to(device="cpu", dtype=self.compute_dtype),
-                        B_blk,
+                        A_y.to(device="cpu", dtype=self.compute_dtype),
+                        B_y,
+                        y_start=y0,
+                        count_samples=(y0 == 0),
                     )
-                    del B_blk
-            else:
-                with time_block(self.logger, self.device, timings, "store"):
-                    A[s0:s1] = A_blk.to(out_device, dtype=self.dtype)
+                    if t_part is not None:
+                        metric_ms += toc_ms(self.logger, self.device, t_part)
+                    del B_y
+                else:
+                    t_part = tic(self.logger, self.device) if self._debug_enabled() else None
+                    A[s0:s1, :, y0:y1, :] = A_y.to(out_device, dtype=self.dtype)
+                    if t_part is not None:
+                        store_ms += toc_ms(self.logger, self.device, t_part)
+
+                del Y_idx, Y_lib_shifted_indexed, A_y
+
+            if self._debug_enabled():
+                timings["gather"] = gather_ms
+                timings["weighted_avg"] = weighted_avg_ms
+                if stream_kind is not None:
+                    timings["metric"] = metric_ms
+                else:
+                    timings["store"] = store_ms
 
             if self._debug_enabled():
                 timings["total"] = toc_ms(self.logger, self.device, t_batch)
@@ -758,7 +820,7 @@ class PairwiseCCM:
                     ),
                 )
 
-            del weights, indices, I, weights_c, Y_idx, Y_lib_shifted_indexed, A_blk
+            del weights, indices, I, weights_c
 
         if stream_kind is not None:
             return stream_metric_state_finalize(stream_kind, stream_state)

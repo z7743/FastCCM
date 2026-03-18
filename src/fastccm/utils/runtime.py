@@ -114,6 +114,151 @@ def _resolve_batch_size(total_samples: int, budget_bytes: int, base_bytes: int, 
     return int(batch_size)
 
 
+def _simplex_base_bytes(
+    *,
+    num_ts_X: int,
+    library_size: int,
+    max_E_X: int,
+    total_samples: int,
+    num_ts_Y: int,
+    max_E_Y: int,
+    dtype,
+    compute_dtype,
+    extra_base_bytes: int = 0,
+) -> int:
+    dbytes = _dtype_bytes(dtype)
+    cbytes = _dtype_bytes(compute_dtype)
+    nX = int(num_ts_X)
+    L = int(library_size)
+    Ex = int(max_E_X)
+    S = int(total_samples)
+    nY = int(num_ts_Y)
+    Ey = int(max_E_Y)
+    return int(
+        dbytes * (
+            nX * L * Ex +      # X_lib sampled library embeddings
+            nX * S * Ex +      # X_sample full query embeddings
+            nY * L * Ey        # Y_lib_s original targets
+        )
+        + cbytes * (L * nY * Ey)  # Y_lib_lne compute copy
+        + int(extra_base_bytes)
+    )
+
+
+# Deterministic simplex split policy constants calibrated from offline CPU
+# sweeps. The goal is to keep the gathered target tile near a stable working-set
+# size while falling back to a conservative `ny` chunk when search dominates.
+SIMPLEX_CALIBRATED_TARGET_TILE_BYTES = 72 * 1024 * 1024
+SIMPLEX_CALIBRATED_TARGET_BATCH_MIN = 8
+SIMPLEX_CALIBRATED_TARGET_BATCH_MAX = 64
+SIMPLEX_CALIBRATED_SEARCH_DOMINANT_RATIO = 8.0
+SIMPLEX_CALIBRATED_SEARCH_DOMINANT_TARGET_BATCH = 16
+
+
+def resolve_simplex_target_batch_size(
+    num_targets: int,
+    target_batch_size,
+) -> int:
+    nY = int(num_targets)
+    if nY <= 0:
+        return 0
+    if target_batch_size is None:
+        return nY
+    if isinstance(target_batch_size, str):
+        if target_batch_size != "calibrated":
+            raise ValueError("target_batch_size must be a positive int, None, or 'calibrated'.")
+        return nY
+
+    y_batch = min(nY, int(target_batch_size))
+    if y_batch <= 0:
+        raise ValueError("target_batch_size must be positive, None, or 'calibrated'.")
+    return int(y_batch)
+
+
+def _round_pow2_clamped(value: float, min_value: int, max_value: int) -> int:
+    min_value = max(1, int(min_value))
+    max_value = max(min_value, int(max_value))
+    if value <= min_value:
+        return min_value
+    if value >= max_value:
+        return max_value
+
+    lo = min_value
+    while lo * 2 <= value and lo * 2 <= max_value:
+        lo *= 2
+    hi = min(max_value, lo * 2)
+    if hi == lo:
+        return lo
+    return lo if abs(value - lo) <= abs(hi - value) else hi
+
+
+def _calibrated_simplex_target_batch_size(
+    *,
+    num_ts_X: int,
+    num_ts_Y: int,
+    total_samples: int,
+    library_size: int,
+    max_EY: int,
+    nbrs_num_max: int,
+    dtype,
+    compute_dtype,
+    budget_bytes: int,
+    max_E_X: int,
+    extra_base_bytes: int = 0,
+) -> int:
+    nX = int(num_ts_X)
+    nY = int(num_ts_Y)
+    S = int(total_samples)
+    Ey = int(max_EY)
+    K = int(nbrs_num_max)
+    L = int(library_size)
+
+    if nY <= SIMPLEX_CALIBRATED_TARGET_BATCH_MIN:
+        return nY
+
+    cbytes = _dtype_bytes(compute_dtype)
+    dbytes = _dtype_bytes(dtype)
+    ibytes = 8
+    base_bytes = _simplex_base_bytes(
+        num_ts_X=nX,
+        library_size=L,
+        max_E_X=max_E_X,
+        total_samples=S,
+        num_ts_Y=nY,
+        max_E_Y=Ey,
+        dtype=dtype,
+        compute_dtype=compute_dtype,
+        extra_base_bytes=extra_base_bytes,
+    )
+
+    search_per_sample = (
+        cbytes * (nX * L + nX * K) +
+        (dbytes + ibytes) * (nX * K)
+    )
+    reduce_per_sample_full = (
+        cbytes * (nX * K * nY * Ey + nX * nY * Ey) +
+        dbytes * (nX * nY * Ey)
+    )
+    dominance = float(search_per_sample) / float(max(reduce_per_sample_full, 1))
+    if dominance >= SIMPLEX_CALIBRATED_SEARCH_DOMINANT_RATIO:
+        return min(nY, int(SIMPLEX_CALIBRATED_SEARCH_DOMINANT_TARGET_BATCH))
+
+    available_bytes = int(budget_bytes) - int(base_bytes)
+    if available_bytes <= 0:
+        return min(nY, SIMPLEX_CALIBRATED_TARGET_BATCH_MIN)
+
+    # Use the search-dominated batch as the first fixed-point iterate, then set
+    # `ny` so the gathered target tile stays near the calibrated working set.
+    sample_batch_search = max(1, min(S, available_bytes // max(int(search_per_sample), 1)))
+    tile_unit_bytes = max(cbytes * nX * K * Ey * sample_batch_search, 1)
+    target_by = float(SIMPLEX_CALIBRATED_TARGET_TILE_BYTES) / float(tile_unit_bytes)
+    return _round_pow2_clamped(
+        target_by,
+        min_value=min(SIMPLEX_CALIBRATED_TARGET_BATCH_MIN, nY),
+        max_value=min(SIMPLEX_CALIBRATED_TARGET_BATCH_MAX, nY),
+    )
+
+
 def auto_batch_size_smap(
     X_lib,
     X_sample,
@@ -178,8 +323,10 @@ def auto_batch_size_simplex(
     dtype,
     compute_dtype,
     budget_gb=2.0,
+    target_batch_size=None,
+    extra_base_bytes: int = 0,
 ):
-    num_ts_X, L, _ = X_lib.shape
+    num_ts_X, L, max_E_X = X_lib.shape
     num_ts_Y, _, max_EY = Y_lib_s.shape
     S = X_sample.shape[1]
     nX, nY, Ey, K = int(num_ts_X), int(num_ts_Y), int(max_EY), int(nbrs_num_max)
@@ -189,15 +336,41 @@ def auto_batch_size_simplex(
     ibytes = 8  # int64 indices
     budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
 
-    base_bytes = cbytes * (L * nY * Ey)  # Y_lib_lne
+    base_bytes = _simplex_base_bytes(
+        num_ts_X=nX,
+        library_size=L,
+        max_E_X=max_E_X,
+        total_samples=S,
+        num_ts_Y=nY,
+        max_E_Y=Ey,
+        dtype=dtype,
+        compute_dtype=compute_dtype,
+        extra_base_bytes=extra_base_bytes,
+    )
+    if target_batch_size == "calibrated":
+        y_batch = _calibrated_simplex_target_batch_size(
+            num_ts_X=nX,
+            num_ts_Y=nY,
+            total_samples=S,
+            library_size=L,
+            max_EY=Ey,
+            nbrs_num_max=K,
+            dtype=dtype,
+            compute_dtype=compute_dtype,
+            budget_bytes=budget_bytes,
+            max_E_X=max_E_X,
+            extra_base_bytes=extra_base_bytes,
+        )
+    else:
+        y_batch = resolve_simplex_target_batch_size(nY, target_batch_size)
 
     search_per_sample = (
         cbytes * (nX * L + nX * K) +
         (dbytes + ibytes) * (nX * K)
     )
     reduce_per_sample = (
-        cbytes * (nX * K * nY * Ey + nX * nY * Ey) +
-        dbytes * (nX * nY * Ey)
+        cbytes * (nX * K * y_batch * Ey + nX * y_batch * Ey) +
+        dbytes * (nX * y_batch * Ey)
     )
     per_sample_bytes = int(max(search_per_sample, reduce_per_sample) * 1.10)
 
@@ -207,6 +380,7 @@ def auto_batch_size_simplex(
         "per_sample_bytes": int(per_sample_bytes),
         "budget_bytes": int(budget_bytes),
         "estimated_peak_bytes": int(base_bytes + B * max(per_sample_bytes, 0)),
+        "target_batch_size": int(y_batch),
     }
 
 
