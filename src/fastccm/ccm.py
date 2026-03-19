@@ -191,12 +191,11 @@ class PairwiseCCM:
         nbrs_num : int or list[int], optional (simplex only)
             Number of neighbors per source series. If int, the same k is used for all.
             Default is E_x + 1 for each source series.
-        target_batch_size : {int, None, "calibrated"}, optional (simplex only)
+        target_batch_size : {int, None, "auto"}, optional (simplex only)
             Number of target series (`n_Y`) processed per simplex reduction chunk.
             `None` keeps the original all-targets-at-once path, while
-            `"calibrated"` applies a deterministic offline-calibrated policy.
-            When `batch_size="auto"` and this argument is omitted, the
-            calibrated policy is used automatically.
+            `"auto"` applies a deterministic offline-calibrated policy.
+            When this argument is omitted, the auto policy is used by default.
         theta : float, optional (smap only)
             Local weighting strength; larger values induce steeper locality.
             Default is 1.0.
@@ -321,12 +320,11 @@ class PairwiseCCM:
         nbrs_num : int or list[int], optional (simplex only)
             Number of neighbors per source series. If int, the same k is used for all.
             Default is E_x + 1 for each source series.
-        target_batch_size : {int, None, "calibrated"}, optional (simplex only)
+        target_batch_size : {int, None, "auto"}, optional (simplex only)
             Number of target series (`n_Y`) processed per simplex reduction chunk.
             `None` keeps the original all-targets-at-once path, while
-            `"calibrated"` applies a deterministic offline-calibrated policy.
-            When `batch_size="auto"` and this argument is omitted, the
-            calibrated policy is used automatically.
+            `"auto"` applies a deterministic offline-calibrated policy.
+            When this argument is omitted, the auto policy is used by default.
         theta : float, optional (smap only)
             Local weighting strength; larger values induce steeper locality.
             Default is 1.0.
@@ -462,12 +460,14 @@ class PairwiseCCM:
             target_batch_size_provided = "target_batch_size" in kwargs
             target_batch_size = kwargs.get("target_batch_size")
             if isinstance(target_batch_size, str):
-                if target_batch_size != "calibrated":
-                    raise ValueError("target_batch_size must be a positive int, None, or 'calibrated'.")
+                if target_batch_size != "auto":
+                    raise ValueError("target_batch_size must be a positive int, None, or 'auto'.")
             elif target_batch_size is not None:
                 target_batch_size = int(target_batch_size)
                 if target_batch_size <= 0:
-                    raise ValueError("target_batch_size must be positive, None, or 'calibrated'.")
+                    raise ValueError("target_batch_size must be positive, None, or 'auto'.")
+            if not target_batch_size_provided:
+                target_batch_size = "auto"
         elif method == "smap":
             ridge = kwargs.get("ridge", 0.0)
             theta = kwargs.get("theta", 1.0)
@@ -576,8 +576,6 @@ class PairwiseCCM:
                 simplex_extra_base_bytes = int(Y_smp_s.numel() * torch.tensor([], dtype=self.dtype).element_size())
             else:
                 simplex_extra_base_bytes = int(predict_output_bytes)
-            if auto_batch and (not target_batch_size_provided):
-                target_batch_size = "calibrated"
             if auto_batch:
                 batch_size, batch_auto_meta = auto_batch_size_simplex(
                     X_lib, X_sample, Y_lib_s, nbrs_num_max,
@@ -733,6 +731,21 @@ class PairwiseCCM:
         Y_lib_flat = Y_lib_shifted.to(self.compute_dtype).permute(1, 0, 2).reshape(
             X_lib.shape[1], num_ts_Y * max_E_Y
         ).contiguous()
+        target_ranges = tuple(
+            (y0, min(num_ts_Y, y0 + target_batch_size))
+            for y0 in range(0, num_ts_Y, target_batch_size)
+        )
+        max_target_block_width = int(target_batch_size * max_E_Y)
+        gather_buf = torch.empty(
+            (num_ts_X * sample_batch_size * nbrs_num_max, max_target_block_width),
+            device=Y_lib_flat.device,
+            dtype=self.compute_dtype,
+        )
+        reduce_buf = torch.empty(
+            (num_ts_X * sample_batch_size, 1, max_target_block_width),
+            device=Y_lib_flat.device,
+            dtype=self.compute_dtype,
+        )
         #nbrs_mask = (torch.arange(nbrs_num_max).unsqueeze(0) < nbrs_num.unsqueeze(1))
         A = None if stream_kind is not None else torch.empty((subsample_size, max_E_Y, num_ts_Y, num_ts_X), device=out_device, dtype=self.dtype)
         for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "simplex batches"):
@@ -762,33 +775,58 @@ class PairwiseCCM:
             batch_queries = s1 - s0
             flat_indices = indices.reshape(-1)
             weights_rows = weights_c.reshape(num_ts_X * batch_queries, 1, nbrs_num_max)
+            flat_count = int(flat_indices.numel())
+            batch_rows = int(num_ts_X * batch_queries)
+            Y_sample_batch_view = None
+            if stream_kind is not None:
+                Y_sample_batch_view = Y_sample_shifted[:, s0:s1, :].permute(1, 2, 0).to(
+                    device="cpu", dtype=self.compute_dtype
+                ).contiguous()
             gather_ms = 0.0
             weighted_avg_ms = 0.0
             metric_ms = 0.0
             store_ms = 0.0
-            for y0 in range(0, num_ts_Y, target_batch_size):
-                y1 = min(num_ts_Y, y0 + target_batch_size)
+            for y0, y1 in target_ranges:
                 y_width = (y1 - y0) * max_E_Y
 
                 t_part = tic(self.logger, self.device) if self._debug_enabled() else None
-                Y_idx = torch.index_select(
-                    Y_lib_flat[:, y0 * max_E_Y:y1 * max_E_Y],
-                    0,
-                    flat_indices,
-                ).reshape(num_ts_X * batch_queries, nbrs_num_max, y_width)
+                Y_src = Y_lib_flat[:, y0 * max_E_Y:y1 * max_E_Y]
+                if y_width == max_target_block_width:
+                    Y_idx = torch.index_select(
+                        Y_src,
+                        0,
+                        flat_indices,
+                        out=gather_buf[:flat_count],
+                    ).reshape(batch_rows, nbrs_num_max, y_width)
+                else:
+                    Y_idx = torch.index_select(
+                        Y_src,
+                        0,
+                        flat_indices,
+                    ).reshape(batch_rows, nbrs_num_max, y_width)
                 if t_part is not None:
                     gather_ms += toc_ms(self.logger, self.device, t_part)
 
                 t_part = tic(self.logger, self.device) if self._debug_enabled() else None
-                A_y = torch.bmm(weights_rows, Y_idx).reshape(num_ts_X, batch_queries, y1 - y0, max_E_Y)
+                if y_width == max_target_block_width:
+                    A_y = torch.bmm(
+                        weights_rows,
+                        Y_idx,
+                        out=reduce_buf[:batch_rows],
+                    ).reshape(num_ts_X, batch_queries, y1 - y0, max_E_Y)
+                else:
+                    A_y = torch.bmm(weights_rows, Y_idx).reshape(
+                        num_ts_X, batch_queries, y1 - y0, max_E_Y
+                    )
                 A_y = A_y.permute(1, 3, 2, 0).contiguous()  # (B, E_y, y_blk, n_X)
                 if t_part is not None:
                     weighted_avg_ms += toc_ms(self.logger, self.device, t_part)
 
                 if stream_kind is not None:
                     t_part = tic(self.logger, self.device) if self._debug_enabled() else None
-                    B_y = torch.permute(Y_sample_shifted[y0:y1, s0:s1, :], (1, 2, 0)).to(device="cpu", dtype=self.compute_dtype)[:, :, :, None] \
-                        .expand(s1 - s0, max_E_Y, y1 - y0, num_ts_X)
+                    B_y = Y_sample_batch_view[:, :, y0:y1].unsqueeze(-1).expand(
+                        batch_queries, max_E_Y, y1 - y0, num_ts_X
+                    )
                     stream_metric_state_update(
                         stream_kind,
                         stream_state,
@@ -828,7 +866,7 @@ class PairwiseCCM:
                     ),
                 )
 
-            del weights, indices, weights_c, flat_indices, weights_rows
+            del weights, indices, weights_c, flat_indices, weights_rows, Y_sample_batch_view
 
         if stream_kind is not None:
             return stream_metric_state_finalize(stream_kind, stream_state)

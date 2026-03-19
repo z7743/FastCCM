@@ -145,7 +145,7 @@ def _simplex_base_bytes(
     )
 
 
-# Deterministic simplex split policy constants calibrated from offline CPU
+# Deterministic simplex target auto-split constants calibrated from offline CPU
 # sweeps. The goal is to keep the gathered target tile near a stable working-set
 # size while falling back to a conservative `ny` chunk when search dominates.
 SIMPLEX_CALIBRATED_TARGET_TILE_BYTES = 72 * 1024 * 1024
@@ -165,13 +165,13 @@ def resolve_simplex_target_batch_size(
     if target_batch_size is None:
         return nY
     if isinstance(target_batch_size, str):
-        if target_batch_size != "calibrated":
-            raise ValueError("target_batch_size must be a positive int, None, or 'calibrated'.")
-        return nY
+        if target_batch_size == "auto":
+            return nY
+        raise ValueError("target_batch_size must be a positive int, None, or 'auto'.")
 
     y_batch = min(nY, int(target_batch_size))
     if y_batch <= 0:
-        raise ValueError("target_batch_size must be positive, None, or 'calibrated'.")
+        raise ValueError("target_batch_size must be positive, None, or 'auto'.")
     return int(y_batch)
 
 
@@ -347,7 +347,7 @@ def auto_batch_size_simplex(
         compute_dtype=compute_dtype,
         extra_base_bytes=extra_base_bytes,
     )
-    if target_batch_size == "calibrated":
+    if target_batch_size == "auto":
         y_batch = _calibrated_simplex_target_batch_size(
             num_ts_X=nX,
             num_ts_Y=nY,
