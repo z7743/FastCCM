@@ -1,4 +1,7 @@
 # ccm_utils.py
+import logging
+import math
+import sys
 import warnings
 import torch
 import numpy as np
@@ -7,6 +10,11 @@ from fastccm.utils.utils import get_td_embedding_np
 import matplotlib.pyplot as plt
 from matplotlib import cm
 import os
+
+try:
+    from fastccm.utils.runtime import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
 
 
 class Functions:
@@ -60,6 +68,21 @@ class Functions:
             mm.flush()
 
         return mm
+
+    def _make_total_block_progress(self, total_blocks, desc):
+        logger = getattr(self.ccm, "logger", None)
+        if total_blocks <= 1 or logger is None:
+            return None
+        if not logger.isEnabledFor(logging.INFO) or tqdm is None:
+            return None
+        return tqdm(
+            total=total_blocks,
+            desc=desc,
+            unit="block",
+            file=sys.stderr,
+            leave=False,
+            dynamic_ncols=True,
+        )
 
     def _resolve_sizes_compute_(self, X_emb, Y_emb, library_size, sample_size, tp):
         # Mirror PairwiseCCM.__ccm_core 'compute' defaults using GLOBAL min_len
@@ -149,31 +172,39 @@ class Functions:
         L_res, S_res = self._resolve_sizes_compute_(X_emb_aligned, Y_emb_aligned, library_size, sample_size, tp)
 
         out = self._make_out_array((E_y_max, nY, nX), dtype=out_dtype, out_path=out_path, fill_value=np.nan)
+        total_blocks = math.ceil(nY / y_block) * math.ceil(nX / x_block)
+        progress = self._make_total_block_progress(total_blocks, "score blocks")
 
-        for y0 in range(0, nY, y_block):
-            y1 = min(y0 + y_block, nY)
-            for x0 in range(0, nX, x_block):
-                x1 = min(x0 + x_block, nX)
+        try:
+            for y0 in range(0, nY, y_block):
+                y1 = min(y0 + y_block, nY)
+                for x0 in range(0, nX, x_block):
+                    x1 = min(x0 + x_block, nX)
 
-                r_blk = self.ccm.score_matrix(
-                    X_emb_aligned[x0:x1],
-                    Y_emb_aligned[y0:y1],
-                    library_size=L_res,
-                    sample_size=S_res,
-                    exclusion_window=exclusion_window,
-                    tp=tp,
-                    method=method,
-                    seed=seed,
-                    metric=metric,
-                    clean_after=False,
-                    **kwargs
-                )  # shape: (E_y_blk, y_len, x_len)
+                    r_blk = self.ccm.score_matrix(
+                        X_emb_aligned[x0:x1],
+                        Y_emb_aligned[y0:y1],
+                        library_size=L_res,
+                        sample_size=S_res,
+                        exclusion_window=exclusion_window,
+                        tp=tp,
+                        method=method,
+                        seed=seed,
+                        metric=metric,
+                        clean_after=False,
+                        **kwargs
+                    )  # shape: (E_y_blk, y_len, x_len)
 
-                Ey_blk = r_blk.shape[0]
-                out[:Ey_blk, y0:y1, x0:x1] = r_blk
+                    Ey_blk = r_blk.shape[0]
+                    out[:Ey_blk, y0:y1, x0:x1] = r_blk
 
-                if isinstance(out, np.memmap):
-                    out.flush()
+                    if isinstance(out, np.memmap):
+                        out.flush()
+                    if progress is not None:
+                        progress.update(1)
+        finally:
+            if progress is not None:
+                progress.close()
 
         return out
 
@@ -225,31 +256,39 @@ class Functions:
 
         #out = np.full((S_pred, E_y_max, nY, nX), np.nan, dtype=np.float32)
         out = self._make_out_array((S_pred, E_y_max, nY, nX), dtype=out_dtype, out_path=out_path, fill_value=np.nan)
+        total_blocks = math.ceil(nY / y_block) * math.ceil(nX / x_block)
+        progress = self._make_total_block_progress(total_blocks, "predict blocks")
 
-        for y0 in range(0, nY, y_block):
-            y1 = min(y0 + y_block, nY)
-            for x0 in range(0, nX, x_block):
-                x1 = min(x0 + x_block, nX)
+        try:
+            for y0 in range(0, nY, y_block):
+                y1 = min(y0 + y_block, nY)
+                for x0 in range(0, nX, x_block):
+                    x1 = min(x0 + x_block, nX)
 
-                A_blk = self.ccm.predict_matrix(
-                    X_lib_aligned[x0:x1],
-                    Y_lib_aligned[y0:y1],
-                    X_pred_trimmed[x0:x1],
-                    library_size=L_res,
-                    exclusion_window=exclusion_window,
-                    tp=tp,
-                    method=method,
-                    seed=seed,
-                    metric=metric,
-                    clean_after=False,
-                    **kwargs
-                )  # shape: (S_pred, E_y_blk, y_len, x_len)
+                    A_blk = self.ccm.predict_matrix(
+                        X_lib_aligned[x0:x1],
+                        Y_lib_aligned[y0:y1],
+                        X_pred_trimmed[x0:x1],
+                        library_size=L_res,
+                        exclusion_window=exclusion_window,
+                        tp=tp,
+                        method=method,
+                        seed=seed,
+                        metric=metric,
+                        clean_after=False,
+                        **kwargs
+                    )  # shape: (S_pred, E_y_blk, y_len, x_len)
 
-                Ey_blk = A_blk.shape[1]
-                out[:, :Ey_blk, y0:y1, x0:x1] = A_blk
+                    Ey_blk = A_blk.shape[1]
+                    out[:, :Ey_blk, y0:y1, x0:x1] = A_blk
 
-                if isinstance(out, np.memmap):
-                    out.flush()
+                    if isinstance(out, np.memmap):
+                        out.flush()
+                    if progress is not None:
+                        progress.update(1)
+        finally:
+            if progress is not None:
+                progress.close()
 
         return out
 

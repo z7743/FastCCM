@@ -148,11 +148,13 @@ def _simplex_base_bytes(
 # Deterministic simplex target auto-split constants calibrated from offline CPU
 # sweeps. The goal is to keep the gathered target tile near a stable working-set
 # size while falling back to a conservative `ny` chunk when search dominates.
+# Recent pairwise CPU sweeps favored keeping the auto policy in the 16-64 range
+# rather than dropping to 8-target chunks too eagerly.
 SIMPLEX_CALIBRATED_TARGET_TILE_BYTES = 72 * 1024 * 1024
-SIMPLEX_CALIBRATED_TARGET_BATCH_MIN = 8
+SIMPLEX_CALIBRATED_TARGET_BATCH_MIN = 16
 SIMPLEX_CALIBRATED_TARGET_BATCH_MAX = 64
 SIMPLEX_CALIBRATED_SEARCH_DOMINANT_RATIO = 8.0
-SIMPLEX_CALIBRATED_SEARCH_DOMINANT_TARGET_BATCH = 16
+SIMPLEX_CALIBRATED_SEARCH_DOMINANT_TARGET_BATCH = 32
 
 
 def resolve_simplex_target_batch_size(

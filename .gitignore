@@ -35,3 +35,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.log
+tests/
+results/
