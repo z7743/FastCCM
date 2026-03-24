@@ -2,6 +2,10 @@
 import warnings
 import os
 import torch
+try:
+    from pykeops.torch import LazyTensor
+except Exception:  # pragma: no cover - optional dependency
+    LazyTensor = None
 from .utils.metrics import (
     get_metric,
     get_streaming_metric_kind,
@@ -191,6 +195,11 @@ class PairwiseCCM:
         nbrs_num : int or list[int], optional (simplex only)
             Number of neighbors per source series. If int, the same k is used for all.
             Default is E_x + 1 for each source series.
+        neighbor_backend : {"auto", "torch", "pykeops"}, optional (simplex only)
+            Backend used for simplex nearest-neighbor search. `"torch"` keeps the
+            existing `torch.cdist + topk` path, while `"pykeops"` uses
+            `LazyTensor.argKmin` for exact squared-L2 search with the same
+            exclusion-window semantics. `"auto"` currently resolves to `"torch"`.
         target_batch_size : {int, None, "auto"}, optional (simplex only)
             Number of target series (`n_Y`) processed per simplex reduction chunk.
             `None` keeps the original all-targets-at-once path, while
@@ -457,6 +466,9 @@ class PairwiseCCM:
                         else torch.tensor(nbrs_num, device=self.device)
             else:
                 nbrs_num = torch.tensor([X_lib_list[i].shape[-1] + 1 for i in range(num_ts_X)], device=self.device)
+            neighbor_backend = str(kwargs.get("neighbor_backend", "auto")).lower()
+            if neighbor_backend not in {"auto", "torch", "pykeops"}:
+                raise ValueError("neighbor_backend must be 'auto', 'torch', or 'pykeops'.")
             target_batch_size_provided = "target_batch_size" in kwargs
             target_batch_size = kwargs.get("target_batch_size")
             if isinstance(target_batch_size, str):
@@ -622,6 +634,7 @@ class PairwiseCCM:
                 return_pred=return_pred, sample_batch_size=batch_size,
                 nbrs_num_max=int(nbrs_num_max),
                 target_batch_size=selected_target_batch_size,
+                neighbor_backend=neighbor_backend,
             )
 
 
@@ -691,7 +704,8 @@ class PairwiseCCM:
     def __simplex_prediction(self, lib_indices, smpl_indices,
                               X_lib, X_sample, Y_lib_shifted, Y_sample_shifted, 
                               exclusion_rad, nbrs_num, metric_fn, return_pred=False, sample_batch_size=None,
-                              nbrs_num_max=None, target_batch_size=None):
+                              nbrs_num_max=None, target_batch_size=None,
+                              neighbor_backend="auto"):
         num_ts_X = X_lib.shape[0]
         num_ts_Y = Y_lib_shifted.shape[0]
         max_E_Y = Y_lib_shifted.shape[2]
@@ -763,7 +777,8 @@ class PairwiseCCM:
                     weights, indices = self.__get_nbrs_indices_with_weights(
                         X_lib, X_sample_b,
                         nbrs_num, nbrs_num_max, lib_indices, smpl_indices[s0:s1],
-                        exclusion_rad
+                        exclusion_rad,
+                        neighbor_backend=neighbor_backend,
                     )
             except RuntimeError as e:
                 if is_oom_error(e):
@@ -1104,36 +1119,136 @@ class PairwiseCCM:
         return X_buf
 
     def __get_nbrs_indices_with_weights(
-        self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad
+        self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad,
+        *, neighbor_backend="auto"
     ):
         timings = {}
-        try:
-            with time_block(self.logger, self.device, timings, "cdist"):
-                dist = self._cdist(sample, lib)  # (num_ts_X, S_blk, L)
-        except RuntimeError as e:
-            if is_oom_error(e):
-                hard_clear(self.logger, self.device)
-            raise
-
-        if exclusion_rad is None:
-            with time_block(self.logger, self.device, timings, "select"):
-                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
-        else:
-            with time_block(self.logger, self.device, timings, "select"):
-                allowed = (
-                    (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
-                    (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
+        resolved_backend = self.__resolve_simplex_neighbor_backend(neighbor_backend)
+        if resolved_backend == "pykeops":
+            with time_block(self.logger, self.device, timings, "keops_select"):
+                near_dist, indices = self.__get_nbrs_indices_with_weights_pykeops(
+                    lib,
+                    sample,
+                    n_nbrs_max,
+                    lib_idx,
+                    sample_idx,
+                    exclusion_rad,
                 )
-                dist.masked_fill_(~allowed.unsqueeze(0), float("inf"))
-                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
+        else:
+            try:
+                with time_block(self.logger, self.device, timings, "cdist"):
+                    dist = self._cdist(sample, lib)  # (num_ts_X, S_blk, L)
+            except RuntimeError as e:
+                if is_oom_error(e):
+                    hard_clear(self.logger, self.device)
+                raise
+
+            if exclusion_rad is None:
+                with time_block(self.logger, self.device, timings, "select"):
+                    near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
+            else:
+                with time_block(self.logger, self.device, timings, "select"):
+                    allowed = (
+                        (lib_idx[None, :] > (sample_idx[:, None] + exclusion_rad)) |
+                        (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
+                    )
+                    dist.masked_fill_(~allowed.unsqueeze(0), float("inf"))
+                    near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
 
         with time_block(self.logger, self.device, timings, "weights"):
             weights, indices = self.__weights_from_dists(near_dist, indices, n_nbrs, n_nbrs_max)
 
         if self._debug_enabled():
             timings["total"] = sum(v for v in timings.values())
-            self.logger.debug("Neighbor search timings: %s", timings_summary(timings, ["cdist", "select", "weights", "total"]))
+            self.logger.debug(
+                "Neighbor search timings: %s",
+                timings_summary(timings, ["cdist", "select", "keops_select", "weights", "total"]),
+            )
         return weights, indices
+
+    def __resolve_simplex_neighbor_backend(self, neighbor_backend):
+        if neighbor_backend == "auto":
+            return "torch"
+        return neighbor_backend
+
+    def __get_nbrs_indices_with_weights_pykeops(
+        self,
+        lib,
+        sample,
+        n_nbrs_max,
+        lib_idx,
+        sample_idx,
+        exclusion_rad,
+    ):
+        if LazyTensor is None:
+            raise ImportError(
+                "neighbor_backend='pykeops' requires the optional 'pykeops' package."
+            )
+
+        comp = self._neighbor_compute_dtype()
+        lib = self.__to_tensor(lib, dtype=comp)
+        sample = self.__to_tensor(sample, dtype=comp)
+        nX, batch_queries, dim = sample.shape
+        library_size = lib.shape[1]
+        penalty = torch.tensor(1e12, device=self.device, dtype=comp)
+        indices_chunks = []
+        for i in range(int(nX)):
+            q = sample[i]
+            d = lib[i]
+            q_i = LazyTensor(q[:, None, :])
+            d_j = LazyTensor(d[None, :, :])
+            dist_ij = ((q_i - d_j) ** 2).sum(-1)
+            if exclusion_rad is not None:
+                q_idx = sample_idx.to(device=self.device, dtype=comp).view(batch_queries, 1, 1)
+                d_idx = lib_idx.to(device=self.device, dtype=comp).view(1, library_size, 1)
+                q_idx_i = LazyTensor(q_idx)
+                d_idx_j = LazyTensor(d_idx)
+                blocked = ((float(exclusion_rad) + 0.5) - (d_idx_j - q_idx_i).abs()).step()
+                dist_ij = dist_ij + blocked * penalty
+            indices_chunks.append(dist_ij.argKmin(int(n_nbrs_max), dim=1).to(torch.long))
+
+        indices = torch.stack(indices_chunks, dim=0)
+        near_dist = self.__selected_neighbor_distances(
+            sample,
+            lib,
+            indices,
+            lib_idx=lib_idx,
+            sample_idx=sample_idx,
+            exclusion_rad=exclusion_rad,
+        )
+        return near_dist, indices
+
+    def __selected_neighbor_distances(
+        self,
+        sample,
+        lib,
+        indices,
+        *,
+        lib_idx,
+        sample_idx,
+        exclusion_rad,
+    ):
+        nX, batch_queries, dim = sample.shape
+        library_size = lib.shape[1]
+        flat_lib = lib.reshape(int(nX * library_size), int(dim))
+        base = (
+            torch.arange(int(nX), device=indices.device, dtype=torch.long)
+            .view(int(nX), 1, 1)
+            .mul(int(library_size))
+        )
+        flat_indices = (indices + base).reshape(-1)
+        selected = flat_lib.index_select(0, flat_indices).reshape(
+            int(nX), int(batch_queries), int(indices.shape[2]), int(dim)
+        )
+        near_dist = (sample.unsqueeze(2) - selected).square().sum(dim=3).sqrt()
+        if exclusion_rad is not None:
+            selected_lib_idx = lib_idx.to(device=indices.device)[indices]
+            allowed = (
+                (selected_lib_idx > (sample_idx.view(1, -1, 1) + exclusion_rad)) |
+                (selected_lib_idx < (sample_idx.view(1, -1, 1) - exclusion_rad))
+            )
+            near_dist.masked_fill_(~allowed, float("inf"))
+        return near_dist
     
     def __weights_from_dists(self, near_dist, indices, n_nbrs, n_nbrs_max):
         timings = {}
@@ -1187,9 +1302,7 @@ class PairwiseCCM:
         return weights
       
     def _cdist(self, a, b):
-        comp = self.compute_dtype
-        if self.device.startswith("cpu") and comp == torch.float16:
-            comp = torch.float32
+        comp = self._neighbor_compute_dtype()
         try:
             a = self.__to_tensor(a, dtype=comp)
             b = self.__to_tensor(b, dtype=comp)
@@ -1205,6 +1318,12 @@ class PairwiseCCM:
         if isinstance(arr, torch.Tensor):
             return arr.to(device=device, dtype=dtype, copy=False)
         return torch.as_tensor(arr, device=device, dtype=dtype)
+
+    def _neighbor_compute_dtype(self):
+        comp = self.compute_dtype
+        if self.device.startswith("cpu") and comp == torch.float16:
+            comp = torch.float32
+        return comp
 
     def _debug_enabled(self):
         return self.logger.isEnabledFor(logging.DEBUG)
