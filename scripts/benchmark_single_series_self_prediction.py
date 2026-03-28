@@ -15,7 +15,7 @@ import torch
 DEVICE = "cpu"
 DTYPE = "float32"
 METHOD = "simplex"
-MEMORY_BUDGET_GB = 2.0
+MEMORY_BUDGET_GB = 5.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = True
 EMBED_DIM = 20
@@ -118,6 +118,7 @@ def run_one(
             batch_size=BATCH_SIZE,
             seed=base_seed + attempt,
             clean_after=False,
+            neighbor_backend="pykeops"
         )
         timings.append(time.perf_counter() - t0)
 

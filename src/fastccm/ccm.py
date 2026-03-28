@@ -596,6 +596,7 @@ class PairwiseCCM:
                     budget_gb=self.memory_budget_gb,
                     target_batch_size=target_batch_size,
                     extra_base_bytes=simplex_extra_base_bytes,
+                    neighbor_backend=neighbor_backend,
                 )
             else:
                 _, batch_auto_meta = auto_batch_size_simplex(
@@ -605,6 +606,7 @@ class PairwiseCCM:
                     budget_gb=self.memory_budget_gb,
                     target_batch_size=target_batch_size,
                     extra_base_bytes=simplex_extra_base_bytes,
+                    neighbor_backend=neighbor_backend,
                 )
             if batch_size is not None and batch_size <= 0:
                 raise ValueError("batch_size must be positive, 'auto', or None.")
@@ -614,8 +616,9 @@ class PairwiseCCM:
                 batch_auto_meta["base_bytes"] + selected_batch_size * max(batch_auto_meta["per_sample_bytes"], 0)
             )
             self.logger.info(
-                "Batching policy=%s total_samples=%d batch_size=%d num_batches=%d split=%s target_batch_size=%d target_split=%s base_est=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
+                "Batching policy=%s neighbor_backend=%s total_samples=%d batch_size=%d num_batches=%d split=%s target_batch_size=%d target_split=%s base_est=%s per_sample_est=%s budget=%s selected_batch_peak_est=%s",
                 "auto" if auto_batch else ("all-at-once" if batch_size is None else "manual"),
+                str(batch_auto_meta.get("neighbor_backend", neighbor_backend)),
                 total_samples,
                 selected_batch_size,
                 max(1, int(math.ceil(total_samples / max(selected_batch_size, 1)))),
@@ -1191,23 +1194,19 @@ class PairwiseCCM:
         nX, batch_queries, dim = sample.shape
         library_size = lib.shape[1]
         penalty = torch.tensor(1e12, device=self.device, dtype=comp)
-        indices_chunks = []
-        for i in range(int(nX)):
-            q = sample[i]
-            d = lib[i]
-            q_i = LazyTensor(q[:, None, :])
-            d_j = LazyTensor(d[None, :, :])
-            dist_ij = ((q_i - d_j) ** 2).sum(-1)
-            if exclusion_rad is not None:
-                q_idx = sample_idx.to(device=self.device, dtype=comp).view(batch_queries, 1, 1)
-                d_idx = lib_idx.to(device=self.device, dtype=comp).view(1, library_size, 1)
-                q_idx_i = LazyTensor(q_idx)
-                d_idx_j = LazyTensor(d_idx)
-                blocked = ((float(exclusion_rad) + 0.5) - (d_idx_j - q_idx_i).abs()).step()
-                dist_ij = dist_ij + blocked * penalty
-            indices_chunks.append(dist_ij.argKmin(int(n_nbrs_max), dim=1).to(torch.long))
+        q_i = LazyTensor(sample[:, :, None, :])   # (nX, S, 1, D)
+        d_j = LazyTensor(lib[:, None, :, :])      # (nX, 1, L, D)
+        dist_ij = ((q_i - d_j) ** 2).sum(-1)      # (nX, S, L, 1)
+        if exclusion_rad is not None:
+            q_idx = sample_idx.to(device=self.device, dtype=comp).view(1, batch_queries, 1, 1)
+            d_idx = lib_idx.to(device=self.device, dtype=comp).view(1, 1, library_size, 1)
+            q_idx_i = LazyTensor(q_idx)
+            d_idx_j = LazyTensor(d_idx)
+            blocked = ((float(exclusion_rad) + 0.5) - (d_idx_j - q_idx_i).abs()).step()
+            dist_ij = dist_ij + blocked * penalty
 
-        indices = torch.stack(indices_chunks, dim=0)
+        # With one batch dimension (nX), reducing over the library axis means dim=2.
+        indices = dist_ij.argKmin(int(n_nbrs_max), dim=2).to(torch.long)
         near_dist = self.__selected_neighbor_distances(
             sample,
             lib,
@@ -1280,7 +1279,6 @@ class PairwiseCCM:
             timings["total"] = sum(v for v in timings.values())
             self.logger.debug("Neighbor weight timings: %s", timings_summary(timings, ["exp", "mask", "normalize", "total"]))
         return out, indices
-
 
     def __get_local_weights(self, lib, sublib, subset_idx, sample_idx, exclusion_rad, theta):
         dist = self._cdist(sublib, lib)

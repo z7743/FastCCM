@@ -145,6 +145,42 @@ def _simplex_base_bytes(
     )
 
 
+def _resolve_simplex_neighbor_backend(neighbor_backend) -> str:
+    backend = "torch" if neighbor_backend in (None, "auto") else str(neighbor_backend)
+    if backend not in {"torch", "pykeops"}:
+        raise ValueError("neighbor_backend must be 'auto', 'torch', or 'pykeops'.")
+    return backend
+
+
+def _simplex_search_per_sample_bytes(
+    *,
+    num_ts_X: int,
+    library_size: int,
+    nbrs_num_max: int,
+    dtype,
+    compute_dtype,
+    neighbor_backend="torch",
+) -> int:
+    cbytes = _dtype_bytes(compute_dtype)
+    dbytes = _dtype_bytes(dtype)
+    ibytes = 8
+    nX = int(num_ts_X)
+    L = int(library_size)
+    K = int(nbrs_num_max)
+    backend = _resolve_simplex_neighbor_backend(neighbor_backend)
+
+    if backend == "pykeops":
+        return int(
+            cbytes * (nX * K) +
+            (dbytes + ibytes) * (nX * K)
+        )
+
+    return int(
+        cbytes * (nX * L + nX * K) +
+        (dbytes + ibytes) * (nX * K)
+    )
+
+
 # Deterministic simplex target auto-split constants calibrated from offline CPU
 # sweeps. The goal is to keep the gathered target tile near a stable working-set
 # size while falling back to a conservative `ny` chunk when search dominates.
@@ -207,6 +243,7 @@ def _calibrated_simplex_target_batch_size(
     budget_bytes: int,
     max_E_X: int,
     extra_base_bytes: int = 0,
+    neighbor_backend="torch",
 ) -> int:
     nX = int(num_ts_X)
     nY = int(num_ts_Y)
@@ -220,7 +257,6 @@ def _calibrated_simplex_target_batch_size(
 
     cbytes = _dtype_bytes(compute_dtype)
     dbytes = _dtype_bytes(dtype)
-    ibytes = 8
     base_bytes = _simplex_base_bytes(
         num_ts_X=nX,
         library_size=L,
@@ -233,9 +269,13 @@ def _calibrated_simplex_target_batch_size(
         extra_base_bytes=extra_base_bytes,
     )
 
-    search_per_sample = (
-        cbytes * (nX * L + nX * K) +
-        (dbytes + ibytes) * (nX * K)
+    search_per_sample = _simplex_search_per_sample_bytes(
+        num_ts_X=nX,
+        library_size=L,
+        nbrs_num_max=K,
+        dtype=dtype,
+        compute_dtype=compute_dtype,
+        neighbor_backend=neighbor_backend,
     )
     reduce_per_sample_full = (
         cbytes * (nX * K * nY * Ey + nX * nY * Ey) +
@@ -327,6 +367,7 @@ def auto_batch_size_simplex(
     budget_gb=2.0,
     target_batch_size=None,
     extra_base_bytes: int = 0,
+    neighbor_backend="auto",
 ):
     num_ts_X, L, max_E_X = X_lib.shape
     num_ts_Y, _, max_EY = Y_lib_s.shape
@@ -335,8 +376,8 @@ def auto_batch_size_simplex(
 
     cbytes = _dtype_bytes(compute_dtype)
     dbytes = _dtype_bytes(dtype)
-    ibytes = 8  # int64 indices
     budget_bytes = int(budget_gb * (1024 ** 3) * 0.90)
+    resolved_neighbor_backend = _resolve_simplex_neighbor_backend(neighbor_backend)
 
     base_bytes = _simplex_base_bytes(
         num_ts_X=nX,
@@ -362,13 +403,18 @@ def auto_batch_size_simplex(
             budget_bytes=budget_bytes,
             max_E_X=max_E_X,
             extra_base_bytes=extra_base_bytes,
+            neighbor_backend=resolved_neighbor_backend,
         )
     else:
         y_batch = resolve_simplex_target_batch_size(nY, target_batch_size)
 
-    search_per_sample = (
-        cbytes * (nX * L + nX * K) +
-        (dbytes + ibytes) * (nX * K)
+    search_per_sample = _simplex_search_per_sample_bytes(
+        num_ts_X=nX,
+        library_size=L,
+        nbrs_num_max=K,
+        dtype=dtype,
+        compute_dtype=compute_dtype,
+        neighbor_backend=resolved_neighbor_backend,
     )
     reduce_per_sample = (
         cbytes * (nX * K * y_batch * Ey + nX * y_batch * Ey) +
@@ -383,6 +429,7 @@ def auto_batch_size_simplex(
         "budget_bytes": int(budget_bytes),
         "estimated_peak_bytes": int(base_bytes + B * max(per_sample_bytes, 0)),
         "target_batch_size": int(y_batch),
+        "neighbor_backend": resolved_neighbor_backend,
     }
 
 
