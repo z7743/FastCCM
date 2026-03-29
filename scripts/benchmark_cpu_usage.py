@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Benchmark FastCCM performance across explicit matrix/time-series cases."""
+"""Benchmark FastCCM CPU usage across richer nx, ny, T cases."""
 
 from __future__ import annotations
 
 import os
+import resource
 import statistics
 import sys
 import time
@@ -15,8 +16,8 @@ import torch
 
 DEVICE = "cuda"
 DTYPE = "float32"
-METHOD = "smap"
-MEMORY_BUDGET_GB = 2.0
+METHOD = "simplex"
+MEMORY_BUDGET_GB = 1.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = False
 TP = 0
@@ -26,19 +27,35 @@ EXCLUSION_WINDOW = 5
 LIBRARY_SIZE: int | str | None = None
 SAMPLE_SIZE: int | str | None = None
 BATCH_SIZE: int | str | None = "auto"
-ATTEMPTS = 3
+ATTEMPTS = 1
 SEED = 1234
 
-MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
-    (100, 1000),
-    (200, 1000),
-    (800, 500),
-    (100, 8000),
+BENCHMARK_CASES: list[tuple[int, int, int]] = [
+    (50, 50, 500),
+    (50, 50, 1000),
+    (50, 50, 4000),
+    (50, 50, 8000),
+    (100, 100, 500),
+    (100, 100, 1000),
+    (100, 100, 4000),
+    (100, 100, 8000),
+    (200, 200, 500),
+    (200, 200, 1000),
+    (200, 200, 4000),
+    (200, 200, 8000),
+    (400, 400, 500),
+    (400, 400, 1000),
+    (400, 400, 4000),
+    (400, 400, 8000),
+    (800, 800, 500),
+    (800, 800, 1000),
+    (800, 800, 4000),
+    (800, 800, 8000),
 ]
 TORCH_NUM_THREADS = int(
     os.environ.get(
         "FASTCCM_TORCH_NUM_THREADS",
-        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 8)),
+        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 20)),
     )
 )
 TORCH_NUM_INTEROP_THREADS = int(
@@ -56,12 +73,13 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from fastccm import PairwiseCCM 
+from fastccm import PairwiseCCM
 
 
 @dataclass(frozen=True)
 class BenchmarkCase:
-    matrix_size: int
+    n_x: int
+    n_y: int
     ts_length: int
     ex: int
 
@@ -69,11 +87,12 @@ class BenchmarkCase:
 def build_cases() -> list[BenchmarkCase]:
     return [
         BenchmarkCase(
-            matrix_size=matrix_size,
+            n_x=n_x,
+            n_y=n_y,
             ts_length=ts_length,
             ex=X_EMBEDDING_DIM,
         )
-        for matrix_size, ts_length in MATRIX_TIME_PAIRS
+        for n_x, n_y, ts_length in BENCHMARK_CASES
     ]
 
 
@@ -103,19 +122,25 @@ def resolve_exclusion_window(case: BenchmarkCase, library_size: int) -> int:
 
 def generate_random_embeddings(
     rng: np.random.Generator,
-    matrix_size: int,
+    n_x: int,
+    n_y: int,
     ts_length: int,
     ex: int,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     x_emb = [
         rng.standard_normal((ts_length, ex), dtype=np.float32)
-        for _ in range(matrix_size)
+        for _ in range(n_x)
     ]
     y_emb = [
         rng.standard_normal((ts_length, Y_EMBEDDING_DIM), dtype=np.float32)
-        for _ in range(matrix_size)
+        for _ in range(n_y)
     ]
     return x_emb, y_emb
+
+
+def get_process_cpu_seconds() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return float(usage.ru_utime + usage.ru_stime)
 
 
 def run_case(
@@ -133,17 +158,21 @@ def run_case(
     library_size = resolve_size(LIBRARY_SIZE, valid_points, auto_divisor=2)
     sample_size = resolve_size(SAMPLE_SIZE, valid_points, auto_divisor=6)
     exclusion_window = resolve_exclusion_window(case, library_size)
-    timings: list[float] = []
+    wall_seconds: list[float] = []
+    cpu_seconds: list[float] = []
+    cpu_pct: list[float] = []
 
     for attempt in range(attempts):
         rng = np.random.default_rng(base_seed + attempt)
         x_emb, y_emb = generate_random_embeddings(
             rng=rng,
-            matrix_size=case.matrix_size,
+            n_x=case.n_x,
+            n_y=case.n_y,
             ts_length=case.ts_length,
             ex=case.ex,
         )
 
+        cpu_t0 = get_process_cpu_seconds()
         t0 = time.perf_counter()
         _ = ccm.score_matrix(
             X_emb=x_emb,
@@ -156,14 +185,18 @@ def run_case(
             xtwx_precompute=XTWX_PRECOMPUTE,
             xtwy_precompute=XTWY_PRECOMPUTE,
             batch_size=BATCH_SIZE,
-            target_batch_size=None,
             seed=base_seed + attempt,
-            clean_after=False
+            clean_after=False,
         )
-        timings.append(time.perf_counter() - t0)
+        wall_sec = time.perf_counter() - t0
+        cpu_sec = get_process_cpu_seconds() - cpu_t0
+        wall_seconds.append(wall_sec)
+        cpu_seconds.append(cpu_sec)
+        cpu_pct.append(100.0 * cpu_sec / max(wall_sec, 1e-12))
 
     return {
-        "matrix_size": case.matrix_size,
+        "n_x": case.n_x,
+        "n_y": case.n_y,
         "ts_length": case.ts_length,
         "ex": case.ex,
         "ey": Y_EMBEDDING_DIM,
@@ -171,9 +204,16 @@ def run_case(
         "sample_size": sample_size,
         "exclusion_window": exclusion_window,
         "attempts": attempts,
-        "avg_sec": statistics.fmean(timings),
-        "min_sec": min(timings),
-        "max_sec": max(timings),
+        "avg_sec": statistics.fmean(wall_seconds),
+        "min_sec": min(wall_seconds),
+        "max_sec": max(wall_seconds),
+        "avg_cpu_sec": statistics.fmean(cpu_seconds),
+        "min_cpu_sec": min(cpu_seconds),
+        "max_cpu_sec": max(cpu_seconds),
+        "avg_cpu_pct": statistics.fmean(cpu_pct),
+        "min_cpu_pct": min(cpu_pct),
+        "max_cpu_pct": max(cpu_pct),
+        "avg_cpu_cores": statistics.fmean(cpu_pct) / 100.0,
     }
 
 
@@ -187,6 +227,7 @@ def main() -> None:
     cases = build_cases()
 
     print("Benchmark settings:")
+    print("  scenario=cpu_usage")
     print(f"  device={DEVICE}")
     print(f"  dtype={DTYPE}")
     print(f"  method={METHOD}")
@@ -199,12 +240,16 @@ def main() -> None:
     print(f"  xtwx_precompute={XTWX_PRECOMPUTE}")
     print(f"  xtwy_precompute={XTWY_PRECOMPUTE}")
     print(f"  attempts={ATTEMPTS}")
-    print(f"  matrix_time_pairs={MATRIX_TIME_PAIRS}")
+    print(f"  benchmark_cases={BENCHMARK_CASES}")
     print(f"  x_embedding_dim={X_EMBEDDING_DIM}")
     print(f"  torch_num_threads={TORCH_NUM_THREADS}")
     print(f"  torch_num_interop_threads={TORCH_NUM_INTEROP_THREADS}")
+    print("  cpu_pct_note=process CPU usage, can exceed 100% when multiple CPU cores are busy")
     print()
-    print("matrix_size,ts_length,ex,ey,library_size,sample_size,exclusion_window,attempts,avg_sec,min_sec,max_sec")
+    print(
+        "n_x,n_y,ts_length,ex,ey,library_size,sample_size,exclusion_window,attempts,"
+        "avg_sec,min_sec,max_sec,avg_cpu_sec,min_cpu_sec,max_cpu_sec,avg_cpu_pct,min_cpu_pct,max_cpu_pct,avg_cpu_cores"
+    )
 
     for idx, case in enumerate(cases, start=1):
         result = run_case(
@@ -214,9 +259,12 @@ def main() -> None:
             base_seed=SEED + idx * 1000,
         )
         print(
-            f"{result['matrix_size']},{result['ts_length']},{result['ex']},{result['ey']},"
+            f"{result['n_x']},{result['n_y']},{result['ts_length']},{result['ex']},{result['ey']},"
             f"{result['library_size']},{result['sample_size']},{result['exclusion_window']},"
-            f"{result['attempts']},{result['avg_sec']:.6f},{result['min_sec']:.6f},{result['max_sec']:.6f}"
+            f"{result['attempts']},{result['avg_sec']:.6f},{result['min_sec']:.6f},{result['max_sec']:.6f},"
+            f"{result['avg_cpu_sec']:.6f},{result['min_cpu_sec']:.6f},{result['max_cpu_sec']:.6f},"
+            f"{result['avg_cpu_pct']:.2f},{result['min_cpu_pct']:.2f},{result['max_cpu_pct']:.2f},"
+            f"{result['avg_cpu_cores']:.2f}"
         )
 
 

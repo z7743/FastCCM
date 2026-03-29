@@ -12,10 +12,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-DEVICE = "cpu"
+DEVICE = "cuda"
 DTYPE = "float32"
 METHOD = "simplex"
-MEMORY_BUDGET_GB = 2.0
+MEMORY_BUDGET_GB = 4.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = True
 EMBED_DIM = 20
@@ -139,7 +139,7 @@ def main() -> None:
         device=DEVICE,
         dtype=DTYPE,
         memory_budget_gb=MEMORY_BUDGET_GB,
-        verbose=0,
+        verbose=2,
     )
 
     print("Benchmark settings:")
