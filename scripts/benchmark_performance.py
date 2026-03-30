@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-DEVICE = "cuda"
+DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "smap"
-MEMORY_BUDGET_GB = 2.0
+METHOD = "simplex"
+MEMORY_BUDGET_GB = 3.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = False
 TP = 0
@@ -26,7 +26,7 @@ EXCLUSION_WINDOW = 5
 LIBRARY_SIZE: int | str | None = None
 SAMPLE_SIZE: int | str | None = None
 BATCH_SIZE: int | str | None = "auto"
-ATTEMPTS = 3
+ATTEMPTS = 1
 SEED = 1234
 
 MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
@@ -38,7 +38,7 @@ MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
 TORCH_NUM_THREADS = int(
     os.environ.get(
         "FASTCCM_TORCH_NUM_THREADS",
-        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 8)),
+        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 10)),
     )
 )
 TORCH_NUM_INTEROP_THREADS = int(
@@ -156,7 +156,7 @@ def run_case(
             xtwx_precompute=XTWX_PRECOMPUTE,
             xtwy_precompute=XTWY_PRECOMPUTE,
             batch_size=BATCH_SIZE,
-            target_batch_size=None,
+            #target_batch_size=16,
             seed=base_seed + attempt,
             clean_after=False
         )
@@ -182,7 +182,7 @@ def main() -> None:
         device=DEVICE,
         dtype=DTYPE,
         memory_budget_gb=MEMORY_BUDGET_GB,
-        verbose=0,
+        verbose=2,
     )
     cases = build_cases()
 

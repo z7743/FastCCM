@@ -127,6 +127,7 @@ _calibrated_simplex_target_batch_size = runtime_module._calibrated_simplex_targe
 _dtype_bytes = runtime_module._dtype_bytes
 _resolve_batch_size = runtime_module._resolve_batch_size
 _simplex_base_bytes = runtime_module._simplex_base_bytes
+_simplex_per_sample_bytes = runtime_module._simplex_per_sample_bytes
 
 
 @dataclass(frozen=True)
@@ -478,7 +479,7 @@ def estimate_selected_sample_batch_size(
         cbytes * (n_x * k * effective_target_batch_size * ey + n_x * effective_target_batch_size * ey)
         + dbytes * (n_x * effective_target_batch_size * ey)
     )
-    per_sample_bytes = int(max(search_per_sample, reduce_per_sample) * 1.10)
+    per_sample_bytes = _simplex_per_sample_bytes(search_per_sample, reduce_per_sample)
     batch_size = _resolve_batch_size(sample_size, budget_bytes, base_bytes, per_sample_bytes)
     return int(batch_size)
 

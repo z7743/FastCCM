@@ -150,6 +150,8 @@ def _simplex_base_bytes(
 # size while falling back to a conservative `ny` chunk when search dominates.
 # Recent pairwise CPU sweeps favored keeping the auto policy in the 16-64 range
 # rather than dropping to 8-target chunks too eagerly.
+SIMPLEX_SEARCH_SAFETY_FACTOR = 1.50
+SIMPLEX_REDUCE_SAFETY_FACTOR = 1.10
 SIMPLEX_CALIBRATED_TARGET_TILE_BYTES = 72 * 1024 * 1024
 SIMPLEX_CALIBRATED_TARGET_BATCH_MIN = 16
 SIMPLEX_CALIBRATED_TARGET_BATCH_MAX = 64
@@ -259,6 +261,12 @@ def _calibrated_simplex_target_batch_size(
         min_value=min(SIMPLEX_CALIBRATED_TARGET_BATCH_MIN, nY),
         max_value=min(SIMPLEX_CALIBRATED_TARGET_BATCH_MAX, nY),
     )
+
+
+def _simplex_per_sample_bytes(search_per_sample: int, reduce_per_sample: int) -> int:
+    search_bytes = float(search_per_sample) * float(SIMPLEX_SEARCH_SAFETY_FACTOR)
+    reduce_bytes = float(reduce_per_sample) * float(SIMPLEX_REDUCE_SAFETY_FACTOR)
+    return int(max(search_bytes, reduce_bytes))
 
 
 def auto_batch_size_smap(
@@ -374,7 +382,7 @@ def auto_batch_size_simplex(
         cbytes * (nX * K * y_batch * Ey + nX * y_batch * Ey) +
         dbytes * (nX * y_batch * Ey)
     )
-    per_sample_bytes = int(max(search_per_sample, reduce_per_sample) * 1.10)
+    per_sample_bytes = _simplex_per_sample_bytes(search_per_sample, reduce_per_sample)
 
     B = _resolve_batch_size(int(S), budget_bytes, base_bytes, per_sample_bytes)
     return B, {
