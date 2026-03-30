@@ -15,7 +15,7 @@ import torch
 
 DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "simplex"
+METHOD = "smap"
 MEMORY_BUDGET_GB = 5.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = False
@@ -26,7 +26,7 @@ EXCLUSION_WINDOW = 5
 LIBRARY_SIZE: int | str | None = None
 SAMPLE_SIZE: int | str | None = None
 BATCH_SIZE: int | str | None = "auto"
-ATTEMPTS = 1
+ATTEMPTS = 3
 SEED = 1234
 
 MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
@@ -38,7 +38,7 @@ MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
 TORCH_NUM_THREADS = int(
     os.environ.get(
         "FASTCCM_TORCH_NUM_THREADS",
-        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 8)),
+        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 10)),
     )
 )
 TORCH_NUM_INTEROP_THREADS = int(

@@ -1,7 +1,88 @@
 # ccm.py
 import warnings
 import os
+import sysconfig
+import shlex
+from pathlib import Path
 import torch
+
+
+def _quote_compiler_flag(prefix: str, path: str | os.PathLike[str] | None) -> str:
+    if not path:
+        return ""
+    return f"{prefix}{shlex.quote(str(path))}"
+
+
+def _patched_pykeops_python_includes() -> str:
+    try:
+        import pybind11
+    except Exception:
+        return ""
+
+    include_dirs: list[str] = []
+    for candidate in (
+        sysconfig.get_path("include"),
+        sysconfig.get_path("platinclude"),
+        getattr(pybind11, "get_include", lambda *args, **kwargs: None)(),
+    ):
+        if not candidate:
+            continue
+        candidate_str = str(candidate)
+        if candidate_str not in include_dirs:
+            include_dirs.append(candidate_str)
+
+    return " ".join(_quote_compiler_flag("-I", path) for path in include_dirs)
+
+
+def _patch_keops_compiler_flags(base_config) -> str:
+    flags = []
+    if base_config.get_cpp_env_flags():
+        flags.append(base_config.get_cpp_env_flags().strip())
+    flags.append(base_config.get_compile_options().strip())
+
+    include_dir = Path(base_config.get_base_dir_path()) / "include"
+    bindings_dir = Path(base_config.get_bindings_source_dir())
+    flags.append(_quote_compiler_flag("-I", include_dir))
+    flags.append(_quote_compiler_flag("-I", bindings_dir))
+
+    if base_config.get_use_Apple_clang():
+        brew_prefix = base_config.get_brew_prefix()
+        flags.append("-Xpreprocessor -fopenmp")
+        if brew_prefix:
+            flags.append(_quote_compiler_flag("-I", Path(brew_prefix) / "opt/libomp/include"))
+            flags.append(_quote_compiler_flag("-L", Path(brew_prefix) / "opt/libomp/lib"))
+    else:
+        flags.append("-fopenmp")
+
+    if os.uname().sysname == "Darwin" and os.uname().machine in {"arm64", "arm64e"}:
+        flags.append("-arch arm64")
+
+    if os.uname().sysname == "Darwin":
+        flags.append("-undefined dynamic_lookup")
+        flags.append("-flto")
+
+    flags.append("-flto=auto")
+    return " ".join(part for part in flags if part)
+
+
+def _configure_pykeops_for_paths_with_spaces() -> None:
+    try:
+        import pykeops.config as pykeops_config
+        import pykeops.common.keops_io.LoadKeOps_cpp as load_keops_cpp
+        import keopscore.binders.LinkCompile as link_compile
+    except Exception:
+        return
+
+    pykeops_config.python_includes = _patched_pykeops_python_includes()
+    load_keops_cpp.python_includes = pykeops_config.python_includes
+
+    patched_cpp_flags = _patch_keops_compiler_flags(pykeops_config.pykeops_base)
+    pykeops_config.pykeops_base.cpp_flags = patched_cpp_flags
+    link_compile.cpp_flags = patched_cpp_flags
+
+
+_configure_pykeops_for_paths_with_spaces()
+
 try:
     from pykeops.torch import LazyTensor
 except Exception:  # pragma: no cover - optional dependency
@@ -104,6 +185,8 @@ class PairwiseCCM:
             raise ValueError("memory_budget_gb must be positive.")
         
         self.logger = setup_logger(__name__, verbose=verbose, log_file=log_file)
+        self._warned_pykeops_fallback = False
+        self._pykeops_disabled = False
 
     def compute(self, *args, **kwargs):
         """
@@ -1127,17 +1210,32 @@ class PairwiseCCM:
     ):
         timings = {}
         resolved_backend = self.__resolve_simplex_neighbor_backend(neighbor_backend)
+        if resolved_backend == "pykeops" and self._pykeops_disabled:
+            resolved_backend = "torch"
+
         if resolved_backend == "pykeops":
-            with time_block(self.logger, self.device, timings, "keops_select"):
-                near_dist, indices = self.__get_nbrs_indices_with_weights_pykeops(
-                    lib,
-                    sample,
-                    n_nbrs_max,
-                    lib_idx,
-                    sample_idx,
-                    exclusion_rad,
-                )
-        else:
+            try:
+                with time_block(self.logger, self.device, timings, "keops_select"):
+                    near_dist, indices = self.__get_nbrs_indices_with_weights_pykeops(
+                        lib,
+                        sample,
+                        n_nbrs_max,
+                        lib_idx,
+                        sample_idx,
+                        exclusion_rad,
+                    )
+            except Exception as e:
+                if not self._warned_pykeops_fallback:
+                    warnings.warn(
+                        "neighbor_backend='pykeops' is unavailable in this process; "
+                        f"falling back to 'torch'. Original error: {e}",
+                        RuntimeWarning,
+                    )
+                    self._warned_pykeops_fallback = True
+                self._pykeops_disabled = True
+                resolved_backend = "torch"
+
+        if resolved_backend == "torch":
             try:
                 with time_block(self.logger, self.device, timings, "cdist"):
                     dist = self._cdist(sample, lib)  # (num_ts_X, S_blk, L)

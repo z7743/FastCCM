@@ -14,7 +14,7 @@ import torch
 
 DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "simplex"
+METHOD = "smap"
 MEMORY_BUDGET_GB = 5.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = True
@@ -31,7 +31,7 @@ SEED = 1234
 TORCH_NUM_THREADS = int(
     os.environ.get(
         "FASTCCM_TORCH_NUM_THREADS",
-        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 8)),
+        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 14)),
     )
 )
 TORCH_NUM_INTEROP_THREADS = int(

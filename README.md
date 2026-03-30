@@ -5,25 +5,25 @@ FastCCM computes exact CCM scores equivalent to `pyEDM>=2.3.2`.
 
 ## Performance 
 
-Measured on **CPU, Apple M2 16GB**
+Measured on **CPU, Apple M4 Pro 64GB**
 
 CCM matrix timings (E=5, exclusion window=5)
 
 | Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
 |---|---:|---:|
-| 100×100, T=1000 | 0.237 | 0.760 |
-| 200×200, T=1000 | 0.561 | 1.879 |
-| 800×800, T=500 | 2.096 | 6.866 |
-| 100×100, T=8000 | 6.947 | 30.381 |
+| 100×100, T=1000 | 0.054 | 0.471 |
+| 200×200, T=1000 | 0.103 | 1.253 |
+| 800×800, T=500 | 0.502 | 5.381 |
+| 100×100, T=8000 | 1.404 | 14.150 |
 
 Single time series timings (E=20, exclusion window=10)
 
 | Condition | Simplex projection (s) | S-MAP projection (s) |
 |---|---:|---:|
-| T=2000 | 0.008 | 0.016 |
-| T=8000 | 0.097 | 0.193 |
-| T=32000 | 1.479 | 2.929 |
-| T=128000 | 23.771 | 47.008 |
+| T=2000 | 0.008 | 0.012 |
+| T=8000 | 0.038 | 0.095 |
+| T=32000 | 0.443 | 1.294 |
+| T=128000 | 6.327 | 21.148 |
 
 ## Installation
 
