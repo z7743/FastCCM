@@ -15,8 +15,8 @@ import torch
 
 DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "simplex"
-MEMORY_BUDGET_GB = 3.0
+METHOD = "smap"
+MEMORY_BUDGET_GB = 4.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = False
 TP = 0
@@ -26,8 +26,8 @@ EXCLUSION_WINDOW = 5
 LIBRARY_SIZE: int | str | None = None
 SAMPLE_SIZE: int | str | None = None
 BATCH_SIZE: int | str | None = "auto"
-ATTEMPTS = 1
-SEED = 1234
+ATTEMPTS = 3
+SEED = 12345
 
 MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
     (100, 1000),
@@ -182,7 +182,7 @@ def main() -> None:
         device=DEVICE,
         dtype=DTYPE,
         memory_budget_gb=MEMORY_BUDGET_GB,
-        verbose=2,
+        verbose=0,
     )
     cases = build_cases()
 

@@ -12,9 +12,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-DEVICE = "cuda"
+DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "simplex"
+METHOD = "smap"
 MEMORY_BUDGET_GB = 4.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = True
@@ -27,7 +27,7 @@ SAMPLE_SIZE: int | str | None = None
 BATCH_SIZE: int | str | None = "auto"
 LENGTHS = [2_000, 8_000, 32_000, 128_000]
 ATTEMPTS = 3
-SEED = 1234
+SEED = 12345
 TORCH_NUM_THREADS = int(
     os.environ.get(
         "FASTCCM_TORCH_NUM_THREADS",
@@ -139,7 +139,7 @@ def main() -> None:
         device=DEVICE,
         dtype=DTYPE,
         memory_budget_gb=MEMORY_BUDGET_GB,
-        verbose=2,
+        verbose=0,
     )
 
     print("Benchmark settings:")
