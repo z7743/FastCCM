@@ -1048,10 +1048,8 @@ class PairwiseCCM:
                         torch.mul(weights.unsqueeze(-2), Xint_t.unsqueeze(1), out=weighted_design)
                         XTWy = torch.matmul(weighted_design, Yc_flat)
 
-                with time_block(self.logger, self.device, timings, "cholesky"):
-                    Lchol = torch.linalg.cholesky(XTWX)                 # (nX, B, Ex1, Ex1)
                 with time_block(self.logger, self.device, timings, "solve"):
-                    beta  = torch.cholesky_solve(XTWy, Lchol)           # (nX, B, Ex1, nY*Ey)
+                    beta = torch.linalg.solve(XTWX, XTWy)               # (nX, B, Ex1, nY*Ey)
 
                 with time_block(self.logger, self.device, timings, "query_design"):
                     Xq = X_sample_b.to(self.compute_dtype)              # (nX, B, Ex)
@@ -1088,11 +1086,11 @@ class PairwiseCCM:
                         timings_summary(
                             timings,
                             order=["slice", "local_weights", "square", "cast_xy", "design", "XTWX", "XTWy",
-                                   "cholesky", "solve", "query_design", "predict", "metric", "store", "total"],
+                                   "solve", "query_design", "predict", "metric", "store", "total"],
                         ),
                     )
 
-                del weights, XTWX, XTWy, Lchol, beta, Xq, pred_flat, A
+                del weights, XTWX, XTWy, beta, Xq, pred_flat, A
             except RuntimeError as e:
                 if is_oom_error(e):
                     self.logger.warning("OOM in SMAP batch [%d:%d): %s", int(s0), int(s1), str(e))
