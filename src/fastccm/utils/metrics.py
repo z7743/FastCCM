@@ -7,6 +7,14 @@ import torch
 Metric = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
+def _corr_accum_dtype(dtype: torch.dtype, device) -> torch.dtype:
+    # Keep the CCM kernels in float32 when requested, but accumulate streamed
+    # correlation statistics in float64 on CPU to avoid catastrophic cancellation.
+    if str(device).startswith("cpu") and dtype in (torch.float16, torch.bfloat16, torch.float32):
+        return torch.float64
+    return dtype
+
+
 def _double_center(D: torch.Tensor) -> torch.Tensor:
     # D: [S, S, N] where N = D*Y*X (vectorized across channels)
     mr = D.mean(dim=1, keepdim=True)            # row means [S,1,N]
@@ -22,7 +30,7 @@ def batch_corr(A: torch.Tensor, B: torch.Tensor, eps: float = 1e-12) -> torch.Te
     muB = B.mean(dim=0, keepdim=True)
     num = ((A - muA) * (B - muB)).sum(dim=0)
     den = torch.sqrt(((A - muA).pow(2)).sum(dim=0) * ((B - muB).pow(2)).sum(dim=0) + eps_t)
-    return num / den
+    return (num / den).clamp(-1.0, 1.0)
 
 
 def batch_mse(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
@@ -135,8 +143,16 @@ def get_streaming_metric_kind(metric_fn) -> Optional[str]:
 
 def stream_metric_state_init(kind: str, D, Y, X, *, device, dtype):
     shape_dyx = (D, Y, X)
-    z_dyx = torch.zeros(shape_dyx, device=device, dtype=dtype)
-    state = {"n": 0, "D": int(D), "dtype": dtype, "device": device}
+    out_dtype = dtype
+    acc_dtype = _corr_accum_dtype(dtype, device) if kind == "corr" else dtype
+    z_dyx = torch.zeros(shape_dyx, device=device, dtype=acc_dtype)
+    state = {
+        "n": 0,
+        "D": int(D),
+        "dtype": out_dtype,
+        "acc_dtype": acc_dtype,
+        "device": device,
+    }
 
     if kind == "corr":
         state.update({
@@ -173,6 +189,8 @@ def stream_metric_state_update(kind: str, state, A_blk, B_blk, *, y_start: int =
     yx = (slice(int(y_start), y_stop), slice(None))
 
     if kind == "corr":
+        A_blk = A_blk.to(device=state["device"], dtype=state["acc_dtype"])
+        B_blk = B_blk.to(device=state["device"], dtype=state["acc_dtype"])
         state["sumA"][dyx] += A_blk.sum(dim=0)
         state["sumB"][dyx] += B_blk.sum(dim=0)
         state["sumAA"][dyx] += (A_blk * A_blk).sum(dim=0)
@@ -199,15 +217,17 @@ def stream_metric_state_finalize(kind: str, state, *, eps=1e-12, neg_nrmse_T=0.5
     n = max(int(state["n"]), 1)
     D = max(int(state["D"]), 1)
     device = state["device"]
-    dtype = state["dtype"]
-    n_t = torch.tensor(float(n), device=device, dtype=dtype)
-    eps_t = torch.tensor(eps, device=device, dtype=dtype)
+    out_dtype = state["dtype"]
+    acc_dtype = state.get("acc_dtype", out_dtype)
+    n_t = torch.tensor(float(n), device=device, dtype=acc_dtype)
+    eps_t = torch.tensor(eps, device=device, dtype=acc_dtype)
 
     if kind == "corr":
         num = state["sumAB"] - (state["sumA"] * state["sumB"] / n_t)
         denA = state["sumAA"] - (state["sumA"] * state["sumA"] / n_t)
         denB = state["sumBB"] - (state["sumB"] * state["sumB"] / n_t)
-        return num / torch.sqrt(denA * denB + eps_t)
+        den = torch.sqrt(denA.clamp_min(0.0) * denB.clamp_min(0.0) + eps_t)
+        return (num / den).clamp(-1.0, 1.0).to(dtype=out_dtype)
     if kind == "mse":
         return state["sum_sq_err"] / n_t
     if kind == "rmse":

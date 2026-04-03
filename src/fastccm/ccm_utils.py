@@ -496,7 +496,7 @@ class Functions:
             exclusion_window=0, 
             E_range=np.arange(1,10,1), 
             tau_range=np.arange(1,10,1), 
-            tp_max=1,  
+            tp_range=np.arange(1,2,1),
             method="simplex", 
             trials=3, 
             seed=None,
@@ -521,9 +521,10 @@ class Functions:
                 Embedding dimensions to test. Default: np.arange(1, 10).
             tau_range : array-like of int, optional
                 Time delays to test. Default: np.arange(1, 10).
-            tp_max : int, optional
-                Maximum prediction interval used to form Y targets. Targets correspond
-                to tp=1..tp_max (tp=0 is not included here). Default: 1.
+            tp_range : array-like of int, optional
+                Prediction intervals used to form Y targets. Default: np.arange(1, 2).
+                If legacy `tp_max` is provided in `kwargs`, this becomes
+                np.arange(1, tp_max + 1).
             method : {"simplex", "smap"}, optional
                 Local regressor. Default: "simplex".
             trials : int, optional
@@ -548,19 +549,32 @@ class Functions:
             {
             "E_range": array-like,                         # as provided
             "tau_range": array-like,                       # as provided
-            "tp_range": np.ndarray,                        # np.arange(1, tp_max + 1)
-            "result": np.ndarray,                          # shape: (tp_max, len(tau_range), len(E_range))
+            "tp_range": np.ndarray,                        # as provided / resolved
+            "result": np.ndarray,                          # shape: (len(tp_range), len(tau_range), len(E_range))
             "optimal_tau": int,                            # tau with highest mean over tp
             "optimal_E": int,                              # E with highest mean over tp
-            "values": np.ndarray,                          # result[:, tau*, E*], shape: (tp_max,)
+            "values": np.ndarray,                          # result[:, tau*, E*], shape: (len(tp_range),)
             }
         """
         if y is None:
             y = x  # Default Y to X if not provided
+
+        legacy_tp_max = kwargs.pop("tp_max", None)
+        if legacy_tp_max is not None:
+            tp_range = np.arange(1, int(legacy_tp_max) + 1)
+
+        tp_range = np.asarray(tp_range, dtype=int)
+        if tp_range.ndim == 0:
+            tp_range = tp_range[None]
+        if tp_range.size == 0:
+            raise ValueError("tp_range must contain at least one positive integer.")
+        if np.any(tp_range <= 0):
+            raise ValueError("tp_range must contain only positive integers.")
+        tp_max = int(tp_range.max())
          
         # Prepare embeddings and compute CCM for each tau and E combination
         X_emb = np.concatenate([np.array([get_td_embedding_np(x[:-tp_max,None],e,tau)[:,:,0] for e in E_range],dtype=object) for tau in tau_range])
-        Y_emb = [y[:(y.shape[0]+i), None] for i in np.arange(-(tp_max)+1,1)]
+        Y_emb = [y[: y.shape[0] - tp_max + tp, None] for tp in tp_range]
         
         res = np.mean([self.ccm.score_matrix(X_emb,Y_emb,
                                library_size=library_size,
@@ -570,7 +584,7 @@ class Functions:
                                method=method,
                                seed=None if seed is None else int(seed) + exp,
                                metric=metric,
-                               **kwargs)[0].reshape(tp_max,tau_range.shape[0],E_range.shape[0],) for exp in range(trials)],axis=0)
+                               **kwargs)[0].reshape(tp_range.shape[0],tau_range.shape[0],E_range.shape[0],) for exp in range(trials)],axis=0)
         
 
         # Find optimal tau and E for this set
@@ -581,7 +595,7 @@ class Functions:
         return {
             "E_range": E_range,
             "tau_range": tau_range,
-            "tp_range": np.arange(1, tp_max + 1),
+            "tp_range": tp_range,
             "result": res,
             "optimal_tau": tau_range[max_idx[0]],
             "optimal_E": E_range[max_idx[1]],

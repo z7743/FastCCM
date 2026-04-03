@@ -132,6 +132,7 @@ class PairwiseCCM:
             method = "simplex", 
             seed = None, 
             metric = "corr",
+            subtract_global = False,
             batch_size="auto",
             clean_after=True,
             **kwargs
@@ -176,6 +177,10 @@ class PairwiseCCM:
             Seed for deterministic sampling of library and sample indices.
         metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, default "corr"
             Scoring applied to (prediction, target).
+        subtract_global : bool, default False
+            If True, fit a global linear model for each source/target pair using the
+            sampled library points and subtract its metric score from the local CCM
+            score. The returned tensor is therefore `local_score - global_score`.
         batch_size : int or {"auto", None}, default "auto"
             Number of query points processed per chunk. If "auto", a heuristic estimates
             a safe chunk size using `memory_budget_gb` from the class constructor.
@@ -244,6 +249,7 @@ class PairwiseCCM:
             method=method,
             seed=seed,
             metric=metric,
+            subtract_global=subtract_global,
             batch_size=batch_size,
             **kwargs
         )
@@ -265,6 +271,7 @@ class PairwiseCCM:
             method = "simplex", 
             seed = None,
             metric = "corr",
+            subtract_global = False,
             batch_size="auto",
             clean_after=True,
             **kwargs
@@ -305,6 +312,11 @@ class PairwiseCCM:
             Seed for deterministic sampling of library and sample indices.
         metric : {"corr","mse","mae","rmse","neg_nrmse","dcorr"} or Callable, default "corr"
             Scoring applied to (prediction, target).
+        subtract_global : bool, default False
+            If True, fit a global linear model for each source/target pair using the
+            sampled library points and subtract its raw prediction from the local CCM
+            prediction. The returned tensor is therefore
+            `local_prediction - global_prediction`.
         batch_size : int or {"auto", None}, default "auto"
             Number of query points processed per chunk. If "auto", a heuristic estimates
             a safe chunk size using `memory_budget_gb` from the class constructor.
@@ -376,6 +388,7 @@ class PairwiseCCM:
             method=method,
             seed=seed,
             metric=metric,
+            subtract_global=subtract_global,
             batch_size=batch_size,
             **kwargs
         )
@@ -400,17 +413,19 @@ class PairwiseCCM:
         method="simplex",
         seed=None,
         metric="corr",
+        subtract_global=False,
         batch_size=None,
         **kwargs
     ):
         metric_fn = get_metric(metric)
         self.logger.debug(
-            "__ccm_core(mode=%s, method=%s, library_size=%s, sample_size=%s, exclusion_window=%s, batch_size=%s)",
-            mode, method, library_size, sample_size, exclusion_window, batch_size
+            "__ccm_core(mode=%s, method=%s, library_size=%s, sample_size=%s, exclusion_window=%s, batch_size=%s, subtract_global=%s)",
+            mode, method, library_size, sample_size, exclusion_window, batch_size, subtract_global
         )
         # ---------- 1) dims / lengths ----------
         num_ts_X = len(X_lib_list)
         num_ts_Y = len(Y_lib_list)
+        x_dims = tuple(int(X_lib_list[i].shape[-1]) for i in range(num_ts_X))
 
         max_E_X = torch.tensor([X_lib_list[i].shape[-1] for i in range(num_ts_X)], device=self.device).max().item()
         max_E_Y = torch.tensor([Y_lib_list[i].shape[-1] for i in range(num_ts_Y)], device=self.device).max().item()
@@ -468,6 +483,7 @@ class PairwiseCCM:
                     raise ValueError("target_batch_size must be positive, None, or 'auto'.")
             if not target_batch_size_provided:
                 target_batch_size = "auto"
+            global_ridge = 0.0
         elif method == "smap":
             ridge = kwargs.get("ridge", 0.0)
             theta = kwargs.get("theta", 1.0)
@@ -477,6 +493,7 @@ class PairwiseCCM:
                 raise ValueError("xtwx_precompute must be a bool.")
             if not isinstance(xtwy_precompute, bool):
                 raise ValueError("xtwy_precompute must be a bool.")
+            global_ridge = float(ridge)
         else:
             raise ValueError("Invalid method. Supported methods are 'simplex' and 'smap'.")
 
@@ -684,6 +701,21 @@ class PairwiseCCM:
                 xtwy_precompute=xtwy_precompute,
             )
 
+
+        if subtract_global:
+            self.logger.info("Subtracting global linear baseline from %s output", mode)
+            global_out = self.__global_linear_output(
+                X_lib,
+                X_sample,
+                Y_lib_s,
+                Y_smp_s,
+                x_dims=x_dims,
+                metric_fn=metric_fn,
+                ridge=global_ridge,
+                sample_batch_size=batch_size,
+                return_pred=return_pred,
+            )
+            out = out - global_out.to(device=out.device, dtype=out.dtype)
 
         return out
 
@@ -1102,6 +1134,115 @@ class PairwiseCCM:
             X_buf[i, :, :X[i].shape[-1]] = Xi[indices]
 
         return X_buf
+
+    def __global_linear_output(
+        self,
+        X_lib,
+        X_sample,
+        Y_lib_shifted,
+        Y_sample_shifted,
+        *,
+        x_dims,
+        metric_fn,
+        ridge=0.0,
+        sample_batch_size=None,
+        return_pred=False,
+    ):
+        num_ts_X = X_lib.shape[0]
+        num_ts_Y = Y_lib_shifted.shape[0]
+        subset_size = X_lib.shape[1]
+        subsample_size = X_sample.shape[1]
+        max_E_Y = Y_lib_shifted.shape[2]
+        compute_dtype = self.__linear_compute_dtype()
+
+        if sample_batch_size is None or sample_batch_size >= subsample_size:
+            sample_batch_size = subsample_size
+
+        Y_flat = Y_lib_shifted.to(compute_dtype).permute(1, 0, 2).reshape(
+            subset_size, num_ts_Y * max_E_Y
+        ).contiguous()
+        beta_by_source = []
+        for x_idx, ex in enumerate(x_dims):
+            X_design = self.__with_intercept(
+                X_lib[x_idx, :, :ex].to(device=self.device, dtype=compute_dtype, copy=False)
+            )
+            beta_by_source.append(self.__solve_global_linear_beta(X_design, Y_flat, ridge=ridge))
+
+        stream_kind = get_streaming_metric_kind(metric_fn) if (not return_pred) else None
+        stream_state = None
+        out_device = self.device if return_pred else "cpu"
+        out = None
+        if stream_kind is not None:
+            stream_state = stream_metric_state_init(
+                stream_kind, max_E_Y, num_ts_Y, num_ts_X, device="cpu", dtype=compute_dtype
+            )
+        else:
+            out = torch.empty(
+                (subsample_size, max_E_Y, num_ts_Y, num_ts_X),
+                device=out_device,
+                dtype=self.dtype,
+            )
+
+        for s0 in batch_starts(self.logger, subsample_size, sample_batch_size, "global linear batches"):
+            s1 = min(subsample_size, s0 + sample_batch_size)
+            batch_queries = s1 - s0
+            A_blk = None
+            if stream_kind is not None:
+                A_blk = torch.empty(
+                    (batch_queries, max_E_Y, num_ts_Y, num_ts_X),
+                    device="cpu",
+                    dtype=compute_dtype,
+                )
+
+            for x_idx, ex in enumerate(x_dims):
+                Xq = self.__with_intercept(
+                    X_sample[x_idx, s0:s1, :ex].to(device=self.device, dtype=compute_dtype, copy=False)
+                )
+                pred_flat = Xq @ beta_by_source[x_idx]
+                pred = pred_flat.view(batch_queries, num_ts_Y, max_E_Y).permute(0, 2, 1).contiguous()
+                if stream_kind is not None:
+                    A_blk[:, :, :, x_idx] = pred.to(device="cpu", dtype=compute_dtype)
+                else:
+                    out[s0:s1, :, :, x_idx] = pred.to(device=out_device, dtype=self.dtype)
+
+            if stream_kind is not None:
+                B_blk = torch.permute(Y_sample_shifted[:, s0:s1, :], (1, 2, 0)).to(
+                    device="cpu", dtype=compute_dtype
+                )[:, :, :, None].expand(batch_queries, max_E_Y, num_ts_Y, num_ts_X)
+                stream_metric_state_update(stream_kind, stream_state, A_blk, B_blk)
+
+        if stream_kind is not None:
+            return stream_metric_state_finalize(stream_kind, stream_state)
+
+        if return_pred:
+            return out
+
+        B_full = torch.permute(Y_sample_shifted, (1, 2, 0)).unsqueeze(-1).expand(
+            subsample_size, max_E_Y, num_ts_Y, num_ts_X
+        ).to(device=out.device, dtype=compute_dtype)
+        return metric_fn(out.to(dtype=compute_dtype), B_full)
+
+    def __solve_global_linear_beta(self, X_design, Y_flat, ridge=0.0):
+        XtX = X_design.transpose(0, 1) @ X_design
+        XTy = X_design.transpose(0, 1) @ Y_flat
+        eye = torch.eye(XtX.shape[0], device=XtX.device, dtype=XtX.dtype)
+        base = max(float(ridge), 0.0)
+        jitter = tuple(base + extra for extra in (1e-8, 1e-6, 1e-4))
+        for lam in jitter:
+            try:
+                return torch.linalg.solve(XtX + lam * eye, XTy)
+            except RuntimeError:
+                continue
+        return torch.linalg.pinv(X_design) @ Y_flat
+
+    def __with_intercept(self, X):
+        ones = torch.ones((X.shape[0], 1), device=X.device, dtype=X.dtype)
+        return torch.cat([ones, X], dim=1)
+
+    def __linear_compute_dtype(self):
+        if self.device.startswith("cpu") and self.compute_dtype == torch.float16:
+            return torch.float32
+        return self.compute_dtype
 
     def __get_nbrs_indices_with_weights(
         self, lib, sample, n_nbrs, n_nbrs_max, lib_idx, sample_idx, exclusion_rad
