@@ -8,14 +8,13 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0"
 
-from . import data as data
-from . import utils as utils
-
 __all__ = ("__version__", "PairwiseCCM", "Visualizer", "Functions", "data", "utils")
 
 if TYPE_CHECKING:
     from .ccm import PairwiseCCM as _PairwiseCCM
     from .ccm_utils import Visualizer as _Visualizer, Functions as _Functions
+    from . import data as data
+    from . import utils as utils
 
 def __getattr__(name: str):
     if name == "PairwiseCCM":
@@ -27,4 +26,10 @@ def __getattr__(name: str):
     if name == "Functions":
         from .ccm_utils import Functions
         return Functions
+    if name == "data":
+        from . import data as data_module
+        return data_module
+    if name == "utils":
+        from . import utils as utils_module
+        return utils_module
     raise AttributeError(f"module 'fastccm' has no attribute {name!r}")

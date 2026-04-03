@@ -1,6 +1,6 @@
 # fastccm/utils/metrics.py
 from __future__ import annotations
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 import torch
 
 # All metrics take A,B with shape [S, D, Y, X] and return [D, Y, X]
@@ -122,7 +122,7 @@ def get_metric(name: str) -> Metric:
     return _METRICS[name]
 
 
-def get_streaming_metric_kind(metric_fn) -> str | None:
+def get_streaming_metric_kind(metric_fn) -> Optional[str]:
     name = getattr(metric_fn, "__name__", "")
     return {
         "batch_corr": "corr",
