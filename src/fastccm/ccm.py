@@ -1256,7 +1256,7 @@ class PairwiseCCM:
 
         if exclusion_rad is None:
             with time_block(self.logger, self.device, timings, "select"):
-                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
+                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=True)
         else:
             with time_block(self.logger, self.device, timings, "select"):
                 allowed = (
@@ -1264,7 +1264,7 @@ class PairwiseCCM:
                     (lib_idx[None, :] < (sample_idx[:, None] - exclusion_rad))
                 )
                 dist.masked_fill_(~allowed.unsqueeze(0), float("inf"))
-                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=False)
+                near_dist, indices = torch.topk(dist, n_nbrs_max, largest=False, sorted=True)
 
         with time_block(self.logger, self.device, timings, "weights"):
             weights, indices = self.__weights_from_dists(near_dist, indices, n_nbrs, n_nbrs_max)

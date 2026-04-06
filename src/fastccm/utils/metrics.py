@@ -235,13 +235,13 @@ def stream_metric_state_finalize(kind: str, state, *, eps=1e-12, neg_nrmse_T=0.5
     if kind == "mae":
         return state["sum_abs_err"] / n_t
     if kind == "neg_nrmse":
-        cnt_t = torch.tensor(float(n * D), device=device, dtype=dtype)
+        cnt_t = torch.tensor(float(n * D), device=device, dtype=out_dtype)
         mse = state["sum_sq_err_sd"] / cnt_t
         rmse = torch.sqrt(mse + eps_t)
         muB = state["sumB_sd"] / cnt_t
         varB = (state["sumBB_sd"] / cnt_t) - (muB * muB)
         rmse_base = torch.sqrt(varB.clamp_min(0.0) + eps_t)
-        T_t = torch.tensor(neg_nrmse_T, device=device, dtype=dtype)
+        T_t = torch.tensor(neg_nrmse_T, device=device, dtype=out_dtype)
         out = torch.exp(-((1.0 / T_t) * torch.pow(rmse / (rmse_base + eps_t), 2)))
-        return out.unsqueeze(0).to(dtype=dtype)
+        return out.unsqueeze(0).to(dtype=out_dtype)
     raise ValueError(f"Unsupported streaming metric kind: {kind}")
