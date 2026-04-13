@@ -101,6 +101,25 @@ class PairwiseCCM:
         
         self.logger = setup_logger(__name__, verbose=verbose, log_file=log_file)
 
+    def _predict_warning_threshold_bytes(self) -> int:
+        budget_bytes = max(1, int(self.memory_budget_gb * (1024 ** 3)))
+        return max(1, min(64 * 1024 * 1024, budget_bytes // 8))
+
+    def _log_predict_output_allocation(self, pred_shape, pred_bytes: int) -> None:
+        level = (
+            logging.WARNING
+            if int(pred_bytes) >= self._predict_warning_threshold_bytes()
+            else logging.INFO
+        )
+        self.logger.log(
+            level,
+            "Predict final tensor allocation shape=%s dtype=%s approx=%s on device=%s (before CPU/NumPy transfer).",
+            str(pred_shape),
+            str(self.dtype),
+            format_bytes(pred_bytes),
+            str(self.device),
+        )
+
     def compute(self, *args, **kwargs):
         """
         DEPRECATED: Use `score_matrix(...)` instead.
@@ -547,13 +566,7 @@ class PairwiseCCM:
                 * torch.tensor([], dtype=self.dtype).element_size()
             )
             predict_output_bytes = pred_bytes
-            self.logger.warning(
-                "Predict final tensor allocation shape=%s dtype=%s approx=%s on device=%s (before CPU/NumPy transfer).",
-                str(pred_shape),
-                str(self.dtype),
-                format_bytes(pred_bytes),
-                str(self.device),
-            )
+            self._log_predict_output_allocation(pred_shape, pred_bytes)
 
         # ---------- 4) indices ----------
         gen_lib = gen_smpl = None
