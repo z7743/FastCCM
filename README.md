@@ -1,22 +1,183 @@
 # FastCCM
-PyTorch-based implementation of Convergent Cross Mapping (CCM) optimized for calculating pairwise CCM matrices.
+
+Fast pairwise Convergent Cross Mapping in PyTorch.
 
 FastCCM computes exact CCM scores equivalent to `pyEDM>=2.3.2`.
 
-## Performance 
+## Features
+
+- Pairwise CCM and pairwise S-Map.
+- Separate source and target sets.
+- Vectorized `E`, `tau`, `tp` search and convergence testing.
+- Blocked execution, auto batching, and memmap output for large matrices.
+
+## Installation
+
+**Requirements:** Python >= 3.9, pip.
+
+**CPU-only**
+
+```bash
+pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+pip install fastccm
+```
+
+**CUDA 12.6**
+
+```bash
+pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu126
+pip install fastccm
+```
+
+**macOS (CPU / MPS)**
+
+```bash
+pip install torch==2.10.0
+pip install fastccm
+```
+
+## Input format
+
+FastCCM expects lists of 2D arrays.
+
+- `X_emb`: source embeddings with shape `(T, E)`.
+- `Y_emb`: target embeddings with shape `(T, E_y)`, or `(T, 1)` for scalar targets.
+- Different lengths are end-aligned automatically.
+
+## Examples
+
+### 1. Generate data and find optimal `E` / `tau`
+
+```python
+import numpy as np
+from fastccm import PairwiseCCM, Functions, Visualizer, utils
+from fastccm.data import get_truncated_rossler_lorenz_rand
+
+system = get_truncated_rossler_lorenz_rand(
+    tmax=200,
+    n_steps=4000,
+    C=2,
+    seed=0,
+)
+
+funcs = Functions(device="cpu", memory_budget_gb=2.0, verbose=0)
+viz = Visualizer()
+
+searches = [
+    funcs.find_optimal_embedding_params(
+        system[:, i],
+        sample_size=400,
+        exclusion_window=500,
+        E_range=np.arange(1, 20),
+        tau_range=np.arange(1, 20),
+        tp_range=np.arange(1, 100, 10),
+        seed=i,
+        subtract_global=False,   # Subtract global linear model fit. Set to True to select E and tau 
+                                 # based on the Simplex Projection without autoregression
+    )
+    for i in range(system.shape[1])
+]
+
+opt_E = [res["optimal_E"] for res in searches]
+opt_tau = [res["optimal_tau"] for res in searches]
+
+print(opt_E)
+print(opt_tau)
+
+viz.visualize_optimal_e_tau(searches[3])
+```
+
+### 2. Build a pairwise CCM matrix with the selected embeddings
+
+```python
+X_emb = utils.embed(system, E=opt_E, tau=opt_tau)
+Y_emb = system.T[:, :, None]
+ccm = PairwiseCCM(device="cpu", memory_budget_gb=2.0, verbose=0)
+
+scores = ccm.score_matrix(
+    X_emb=X_emb,
+    Y_emb=Y_emb,
+    library_size="auto",
+    sample_size="auto",
+    exclusion_window=20,
+    method="simplex",
+    seed=0,
+)
+
+ccm_matrix = scores[0]  # Y is scalar, so output shape is (1, n_Y, n_X)
+print(ccm_matrix.shape)  # (6, 6)
+print(ccm_matrix)
+```
+
+### 3. Run a convergence test
+
+```python
+x_idx = 1
+y_idx = 3
+
+X_pair = [utils.embed(system[:, x_idx], E=opt_E[x_idx], tau=opt_tau[x_idx])[0]]
+Y_pair = [utils.embed(system[:, y_idx], E=opt_E[y_idx], tau=opt_tau[y_idx])[0]]
+
+conv = funcs.convergence_test(
+    X_emb=X_pair,
+    Y_emb=Y_pair,
+    library_sizes=[100, 200, 400, 800, 1600],
+    sample_size="auto",
+    exclusion_window=20,
+    method="simplex",
+    trials=10,
+    seed=0,
+)
+
+print(conv["library_sizes"])
+print(conv["X_to_Y"].shape)  # (n_sizes, trials, E_y, n_Y, n_X)
+
+viz.plot_convergence_test(conv)
+```
+
+### 4. Run larger jobs in blocks
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(0)
+
+X_emb = rng.uniform(0.0, 1.0, size=(50_000, 1000, 5)).astype(np.float32)
+Y_emb = rng.uniform(0.0, 1.0, size=(50_000, 1000, 1)).astype(np.float32)
+
+funcs = Functions(device="cpu", memory_budget_gb=2.0, verbose=1)
+
+scores_mm = funcs.score_matrix_blocked(
+    X_emb=X_emb,
+    Y_emb=Y_emb,
+    x_block=100,
+    y_block=50_000,
+    library_size="auto",
+    sample_size="auto",
+    exclusion_window=20,
+    method="simplex",
+    seed=0,
+    out_path="ccm_scores.dat",
+)
+
+print(type(scores_mm))
+print(scores_mm.shape)
+```
+
+## Performance
 
 Measured on **CPU, Apple M4 Pro 64GB**
 
-CCM matrix timings (E=5, exclusion window=5)
+CCM matrix timings (`E=5`, `exclusion_window=5`)
 
 | Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
 |---|---:|---:|
-| 100×100, T=1000 | 0.075 | 0.530 |
-| 200×200, T=1000 | 0.156 | 1.188 |
-| 800×800, T=500 | 0.721 | 5.501 |
-| 100×100, T=8000 | 3.581 | 14.194 |
+| 100x100, T=1000 | 0.075 | 0.530 |
+| 200x200, T=1000 | 0.156 | 1.188 |
+| 800x800, T=500 | 0.721 | 5.501 |
+| 100x100, T=8000 | 3.581 | 14.194 |
 
-Single time series timings (E=20, exclusion window=10)
+Single time series timings (`E=20`, `exclusion_window=10`)
 
 | Condition | Simplex projection (s) | S-MAP projection (s) |
 |---|---:|---:|
@@ -25,143 +186,8 @@ Single time series timings (E=20, exclusion window=10)
 | T=32000 | 0.755 | 1.380 |
 | T=128000 | 12.945 | 23.922 |
 
-## Installation
+## Related files
 
-**Requirements**: Python ≥ 3.9, pip.
-
-**CPU-only:**
-```bash
-pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
-pip install fastccm
-```
-
-**CUDA:**
-```bash
-pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
-pip install fastccm
-```
-
-**macOS (CPU/MPS):**
-```bash
-pip install torch==2.3.1
-pip install fastccm
-```
-
-## Quick start
-
-This example demonstrates how to use the FastCCM package for performing Convergent Cross Mapping (CCM).
-
-1. Import Required Libraries
-
-```python
-from fastccm import PairwiseCCM, utils
-from fastccm.data import get_truncated_rossler_lorenz_rand
-import numpy as np
-```
-
-2. Initialize the CCM Object
-
-Specify the device to use (e.g., "cpu" or "cuda"):
-
-```python
-ccm = PairwiseCCM(
-    device="cpu",
-)
-```
-
-3. Generate Data
-
-```python
-# Generate a joint Rossler-Lorenz data
-X = get_truncated_rossler_lorenz_rand(400, 20000, alpha=6, C=2, seed=0)
-
-Rossler_emb = utils.embed(X[:, 0], E = 7, tau = 4)   # see find_optimal_embedding_params
-Lorenz_emb  = utils.embed(X[:, 3], E = 8, tau = 9)
-
-print(f"Rossler embedding shape: {Rossler_emb.shape}")
-print(f"Lorenz embedding shape: {Lorenz_emb.shape}")
-
-```
-![alt text](docs/img/rossler_lorenz.png)
-
-### Calculate cross-mapping prediction
-
-```python
-# Rossler cross-mapping Lorenz
-result_rossler_xmap_lorenz = ccm.score_matrix(
-    X_emb=Rossler_emb, 
-    Y_emb=Lorenz_emb, 
-    library_size=None,  # use maximum points
-    sample_size=300,    # use 300 random points to estimate the score
-    exclusion_window=50, 
-    tp=0, 
-    method="simplex",
-    seed=0
-)
-
-# Lorenz cross-mapping Rossler
-result_lorenz_xmap_rossler = ccm.score_matrix(
-    X_emb=Lorenz_emb, 
-    Y_emb=Rossler_emb, 
-    library_size=None, 
-    sample_size=300, 
-    exclusion_window=50, 
-    tp=0, 
-    method="simplex",
-    seed=0
-)
-
-print(f"Rossler xmap Lorenz. Shape: {result_rossler_xmap_lorenz.shape}, score: {result_rossler_xmap_lorenz[-1,0,0]:.3f}")
-print(f"Lorenz xmap Rossler. Shape: {result_lorenz_xmap_rossler.shape}, score: {result_lorenz_xmap_rossler[-1,0,0]:.3f}")
-
-```
-
-### Test convergence
-
-```python
-from fastccm import ccm_utils
-
-conv_test_res = ccm_utils.Functions("cpu").convergence_test(
-    X_emb=Rossler_emb, 
-    Y_emb=Lorenz_emb,
-    library_sizes=[160, 320, 640, 1250, 2500, 5000, 10000, 20000],
-    sample_size=1000, 
-    exclusion_window=50, 
-    tp=0, 
-    method="simplex", 
-    trials=20,
-    seed=0
-)
-```
-
-Plot the convergence test results:
-```python
-ccm_utils.Visualizer().plot_convergence_test(conv_test_res)
-```
-
-![alt text](docs/img/conv_test.png)
-
-### Find optimal time-delay embedding parameters
-```python
-
-optimal_E_tau_res = ccm_utils.Functions("cpu").find_optimal_embedding_params(
-    X[:,3], 
-    library_size=4000, 
-    sample_size=300, 
-    exclusion_window=50,
-    E_range=np.arange(2,30),
-    tau_range=np.arange(1,30),
-    tp_max=50,
-    method="simplex",
-    seed=0
-)
-
-print(f"Optimal E: {optimal_E_tau_res['optimal_E']}, optimal_tau: {optimal_E_tau_res['optimal_tau']}")
-```
-
-Plot the results
-```python
-ccm_utils.Visualizer().visualize_optimal_e_tau(optimal_E_tau_res)
-```
-
-![alt text](docs/img/e_tau_test.png)
+- `notebooks/CCM results comparison.ipynb`
+- `scripts/benchmark_performance.py`
+- `scripts/benchmark_single_series_self_prediction.py`

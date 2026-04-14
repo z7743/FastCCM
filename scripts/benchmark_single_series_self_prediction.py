@@ -14,7 +14,7 @@ import torch
 
 DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "smap"
+METHOD = "simplex"
 MEMORY_BUDGET_GB = 4.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = True

@@ -6,16 +6,21 @@ from sklearn.decomposition import PCA
 def embed(ts, E, tau):
     """
     Embed a time series into a delay embedding space.
-    (n_samples, n_variables) -> (n_variables, n_samples, E)
+    (n_samples, n_variables) -> (n_variables, n_samples, E) for scalar `E`/`tau`
+    (n_samples, n_variables) -> list[(n_samples_i, E_i)] for per-variable `E`/`tau`
     (n_samples, ) -> (1, n_samples, E)
 
     Args:
         ts (list or np.ndarray): Shape (n_samples,) or (n_samples, n_variables).
-        E (int): Embedding dimension.
-        tau (int): Time delay (stride).
+        E (int or sequence[int]): Embedding dimension(s).
+        tau (int or sequence[int]): Time delay(s).
 
     Returns:
-        np.ndarray: Shape (n_variables, n_embedded_samples, E).
+        np.ndarray or list[np.ndarray]:
+            If `E` and `tau` are scalars, returns shape
+            `(n_variables, n_embedded_samples, E)`.
+            If either is a sequence, returns one `(n_embedded_samples_i, E_i)`
+            array per variable.
     """
     if not isinstance(ts, (list, np.ndarray)):
         raise TypeError("ts must be a list or numpy.ndarray with shape (n_samples,) or (n_samples, n_variables).")
@@ -28,15 +33,42 @@ def embed(ts, E, tau):
     elif x.ndim != 2:
         raise ValueError("ts must have shape (n_samples,) or (n_samples, n_variables).")
 
-    # Basic argument checks
-    if not (isinstance(E, (int, np.integer)) and E >= 1):
-        raise ValueError("E must be an integer >= 1.")
-    if not (isinstance(tau, (int, np.integer)) and tau >= 1):
-        raise ValueError("tau must be an integer >= 1.")
+    num_vars = x.shape[1]
 
-    td = get_td_embedding_np(x, E, tau)
+    def _resolve_per_variable_param(value, name):
+        if isinstance(value, (int, np.integer)):
+            ivalue = int(value)
+            if ivalue < 1:
+                raise ValueError(f"{name} must contain integers >= 1.")
+            return [ivalue] * num_vars, True
 
-    return td.transpose((2, 0, 1))
+        arr = np.asarray(value)
+        if arr.ndim != 1:
+            raise ValueError(f"{name} must be an integer or a 1D sequence.")
+        if len(arr) != num_vars:
+            raise ValueError(f"{name} must have length {num_vars}, got {len(arr)}.")
+
+        resolved = []
+        for item in arr:
+            if not isinstance(item, (int, np.integer)):
+                raise ValueError(f"{name} must contain integers >= 1.")
+            ivalue = int(item)
+            if ivalue < 1:
+                raise ValueError(f"{name} must contain integers >= 1.")
+            resolved.append(ivalue)
+        return resolved, False
+
+    E_list, E_is_scalar = _resolve_per_variable_param(E, "E")
+    tau_list, tau_is_scalar = _resolve_per_variable_param(tau, "tau")
+
+    if E_is_scalar and tau_is_scalar:
+        td = get_td_embedding_np(x, E_list[0], tau_list[0])
+        return td.transpose((2, 0, 1))
+
+    return [
+        get_td_embedding_np(x[:, i : i + 1], E_list[i], tau_list[i])[:, :, 0]
+        for i in range(num_vars)
+    ]
 
 def get_td_embeddings(ts, opt_E, opt_tau):
     ts_num = len(ts)
@@ -288,4 +320,3 @@ def calculate_rank_for_variance(data_matrix, variance_threshold=0.95):
     rank = np.searchsorted(cumulative_variance_ratio, variance_threshold) + 1
     
     return rank
-
