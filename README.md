@@ -11,6 +11,28 @@ FastCCM computes exact CCM scores equivalent to `pyEDM>=2.3.2`.
 - Vectorized `E`, `tau`, `tp` search and convergence testing.
 - Blocked execution, auto batching, and memmap output for large matrices.
 
+## Performance
+
+Measured on **CPU, Apple M4 Pro 64GB**
+
+CCM matrix timings (`E=5`, `exclusion_window=5`)
+
+| Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
+|---|---:|---:|
+| 100x100, T=1000 | 0.075 | 0.530 |
+| 200x200, T=1000 | 0.156 | 1.188 |
+| 800x800, T=500 | 0.721 | 5.501 |
+| 100x100, T=8000 | 3.581 | 14.194 |
+
+Single time series timings (`E=20`, `exclusion_window=10`)
+
+| Condition | Simplex projection (s) | S-MAP projection (s) |
+|---|---:|---:|
+| T=2000 | 0.006 | 0.010 |
+| T=8000 | 0.045 | 0.088 |
+| T=32000 | 0.755 | 1.380 |
+| T=128000 | 12.945 | 23.922 |
+
 ## Installation
 
 **Requirements:** Python >= 3.9, pip.
@@ -163,28 +185,6 @@ scores_mm = funcs.score_matrix_blocked(
 print(type(scores_mm))
 print(scores_mm.shape)
 ```
-
-## Performance
-
-Measured on **CPU, Apple M4 Pro 64GB**
-
-CCM matrix timings (`E=5`, `exclusion_window=5`)
-
-| Condition | CCM matrix / simplex (s) | CCM matrix / S-MAP (s) |
-|---|---:|---:|
-| 100x100, T=1000 | 0.075 | 0.530 |
-| 200x200, T=1000 | 0.156 | 1.188 |
-| 800x800, T=500 | 0.721 | 5.501 |
-| 100x100, T=8000 | 3.581 | 14.194 |
-
-Single time series timings (`E=20`, `exclusion_window=10`)
-
-| Condition | Simplex projection (s) | S-MAP projection (s) |
-|---|---:|---:|
-| T=2000 | 0.006 | 0.010 |
-| T=8000 | 0.045 | 0.088 |
-| T=32000 | 0.755 | 1.380 |
-| T=128000 | 12.945 | 23.922 |
 
 ## Related files
 
