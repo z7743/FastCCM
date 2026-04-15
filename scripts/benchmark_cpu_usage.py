@@ -14,10 +14,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-DEVICE = "cuda"
+from benchmark_report import update_report_section
+
+DEVICE = "cpu"
 DTYPE = "float32"
 METHOD = "simplex"
-MEMORY_BUDGET_GB = 1.0
+MEMORY_BUDGET_GB = 2.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = False
 TP = 0
@@ -55,7 +57,7 @@ BENCHMARK_CASES: list[tuple[int, int, int]] = [
 TORCH_NUM_THREADS = int(
     os.environ.get(
         "FASTCCM_TORCH_NUM_THREADS",
-        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 20)),
+        os.environ.get("TORCH_NUM_THREADS", min(os.cpu_count() or 1, 10)),
     )
 )
 TORCH_NUM_INTEROP_THREADS = int(
@@ -225,26 +227,52 @@ def main() -> None:
         verbose=0,
     )
     cases = build_cases()
+    settings = {
+        "scenario": "cpu_usage",
+        "device": DEVICE,
+        "dtype": DTYPE,
+        "method": METHOD,
+        "tp": TP,
+        "exclusion_window": EXCLUSION_WINDOW,
+        "library_size": LIBRARY_SIZE if LIBRARY_SIZE is not None else "all points",
+        "sample_size": SAMPLE_SIZE if SAMPLE_SIZE is not None else "all points",
+        "batch_size": BATCH_SIZE,
+        "memory_budget_gb": MEMORY_BUDGET_GB,
+        "xtwx_precompute": XTWX_PRECOMPUTE,
+        "xtwy_precompute": XTWY_PRECOMPUTE,
+        "attempts": ATTEMPTS,
+        "benchmark_cases": BENCHMARK_CASES,
+        "x_embedding_dim": X_EMBEDDING_DIM,
+        "torch_num_threads": TORCH_NUM_THREADS,
+        "torch_num_interop_threads": TORCH_NUM_INTEROP_THREADS,
+        "cpu_pct_note": "process CPU usage, can exceed 100% when multiple CPU cores are busy",
+    }
+    columns = [
+        "n_x",
+        "n_y",
+        "ts_length",
+        "ex",
+        "ey",
+        "library_size",
+        "sample_size",
+        "exclusion_window",
+        "attempts",
+        "avg_sec",
+        "min_sec",
+        "max_sec",
+        "avg_cpu_sec",
+        "min_cpu_sec",
+        "max_cpu_sec",
+        "avg_cpu_pct",
+        "min_cpu_pct",
+        "max_cpu_pct",
+        "avg_cpu_cores",
+    ]
+    markdown_rows: list[list[str]] = []
 
     print("Benchmark settings:")
-    print("  scenario=cpu_usage")
-    print(f"  device={DEVICE}")
-    print(f"  dtype={DTYPE}")
-    print(f"  method={METHOD}")
-    print(f"  tp={TP}")
-    print(f"  exclusion_window={EXCLUSION_WINDOW}")
-    print(f"  library_size={LIBRARY_SIZE if LIBRARY_SIZE is not None else 'all points'}")
-    print(f"  sample_size={SAMPLE_SIZE if SAMPLE_SIZE is not None else 'all points'}")
-    print(f"  batch_size={BATCH_SIZE}")
-    print(f"  memory_budget_gb={MEMORY_BUDGET_GB}")
-    print(f"  xtwx_precompute={XTWX_PRECOMPUTE}")
-    print(f"  xtwy_precompute={XTWY_PRECOMPUTE}")
-    print(f"  attempts={ATTEMPTS}")
-    print(f"  benchmark_cases={BENCHMARK_CASES}")
-    print(f"  x_embedding_dim={X_EMBEDDING_DIM}")
-    print(f"  torch_num_threads={TORCH_NUM_THREADS}")
-    print(f"  torch_num_interop_threads={TORCH_NUM_INTEROP_THREADS}")
-    print("  cpu_pct_note=process CPU usage, can exceed 100% when multiple CPU cores are busy")
+    for key, value in settings.items():
+        print(f"  {key}={value}")
     print()
     print(
         "n_x,n_y,ts_length,ex,ey,library_size,sample_size,exclusion_window,attempts,"
@@ -266,6 +294,38 @@ def main() -> None:
             f"{result['avg_cpu_pct']:.2f},{result['min_cpu_pct']:.2f},{result['max_cpu_pct']:.2f},"
             f"{result['avg_cpu_cores']:.2f}"
         )
+        markdown_rows.append(
+            [
+                str(result["n_x"]),
+                str(result["n_y"]),
+                str(result["ts_length"]),
+                str(result["ex"]),
+                str(result["ey"]),
+                str(result["library_size"]),
+                str(result["sample_size"]),
+                str(result["exclusion_window"]),
+                str(result["attempts"]),
+                f"{result['avg_sec']:.6f}",
+                f"{result['min_sec']:.6f}",
+                f"{result['max_sec']:.6f}",
+                f"{result['avg_cpu_sec']:.6f}",
+                f"{result['min_cpu_sec']:.6f}",
+                f"{result['max_cpu_sec']:.6f}",
+                f"{result['avg_cpu_pct']:.2f}",
+                f"{result['min_cpu_pct']:.2f}",
+                f"{result['max_cpu_pct']:.2f}",
+                f"{result['avg_cpu_cores']:.2f}",
+            ]
+        )
+
+    update_report_section(
+        section_id="cpu-usage",
+        title="CPU Usage",
+        script_name=Path(__file__).name,
+        settings=settings,
+        columns=columns,
+        rows=markdown_rows,
+    )
 
 
 if __name__ == "__main__":

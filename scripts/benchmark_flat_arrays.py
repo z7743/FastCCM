@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark FastCCM performance across explicit matrix/time-series cases."""
+"""Benchmark FastCCM performance for highly asymmetric source/target matrices."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from benchmark_report import update_report_section
 
 DEVICE = "cpu"
 DTYPE = "float32"
-METHOD = "smap"
+METHOD = "simplex"
 MEMORY_BUDGET_GB = 4.0
 XTWX_PRECOMPUTE = True
 XTWY_PRECOMPUTE = False
@@ -31,11 +31,15 @@ BATCH_SIZE: int | str | None = "auto"
 ATTEMPTS = 3
 SEED = 12345
 
-MATRIX_TIME_PAIRS: list[tuple[int, int]] = [
-    (100, 1000),
-    (200, 1000),
-    (800, 500),
-    (100, 8000),
+BENCHMARK_CASES: list[tuple[int, int, int]] = [
+    (1000, 1, 1000),
+    (5000, 1, 1000),
+    (20000, 1, 1000),
+    (20000, 1, 2000),
+    (1, 1000, 1000),
+    (1, 5000, 1000),
+    (1, 20000, 1000),
+    (1, 20000, 2000),
 ]
 TORCH_NUM_THREADS = int(
     os.environ.get(
@@ -58,12 +62,13 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from fastccm import PairwiseCCM 
+from fastccm import PairwiseCCM
 
 
 @dataclass(frozen=True)
 class BenchmarkCase:
-    matrix_size: int
+    n_x: int
+    n_y: int
     ts_length: int
     ex: int
 
@@ -71,11 +76,12 @@ class BenchmarkCase:
 def build_cases() -> list[BenchmarkCase]:
     return [
         BenchmarkCase(
-            matrix_size=matrix_size,
+            n_x=n_x,
+            n_y=n_y,
             ts_length=ts_length,
             ex=X_EMBEDDING_DIM,
         )
-        for matrix_size, ts_length in MATRIX_TIME_PAIRS
+        for n_x, n_y, ts_length in BENCHMARK_CASES
     ]
 
 
@@ -105,17 +111,18 @@ def resolve_exclusion_window(case: BenchmarkCase, library_size: int) -> int:
 
 def generate_random_embeddings(
     rng: np.random.Generator,
-    matrix_size: int,
+    n_x: int,
+    n_y: int,
     ts_length: int,
     ex: int,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     x_emb = [
         rng.standard_normal((ts_length, ex), dtype=np.float32)
-        for _ in range(matrix_size)
+        for _ in range(n_x)
     ]
     y_emb = [
         rng.standard_normal((ts_length, Y_EMBEDDING_DIM), dtype=np.float32)
-        for _ in range(matrix_size)
+        for _ in range(n_y)
     ]
     return x_emb, y_emb
 
@@ -141,7 +148,8 @@ def run_case(
         rng = np.random.default_rng(base_seed + attempt)
         x_emb, y_emb = generate_random_embeddings(
             rng=rng,
-            matrix_size=case.matrix_size,
+            n_x=case.n_x,
+            n_y=case.n_y,
             ts_length=case.ts_length,
             ex=case.ex,
         )
@@ -158,14 +166,14 @@ def run_case(
             xtwx_precompute=XTWX_PRECOMPUTE,
             xtwy_precompute=XTWY_PRECOMPUTE,
             batch_size=BATCH_SIZE,
-            #target_batch_size=16,
             seed=base_seed + attempt,
-            clean_after=False
+            clean_after=False,
         )
         timings.append(time.perf_counter() - t0)
 
     return {
-        "matrix_size": case.matrix_size,
+        "n_x": case.n_x,
+        "n_y": case.n_y,
         "ts_length": case.ts_length,
         "ex": case.ex,
         "ey": Y_EMBEDDING_DIM,
@@ -188,6 +196,7 @@ def main() -> None:
     )
     cases = build_cases()
     settings = {
+        "scenario": "flat_arrays",
         "device": DEVICE,
         "dtype": DTYPE,
         "method": METHOD,
@@ -200,13 +209,14 @@ def main() -> None:
         "xtwx_precompute": XTWX_PRECOMPUTE,
         "xtwy_precompute": XTWY_PRECOMPUTE,
         "attempts": ATTEMPTS,
-        "matrix_time_pairs": MATRIX_TIME_PAIRS,
+        "benchmark_cases": BENCHMARK_CASES,
         "x_embedding_dim": X_EMBEDDING_DIM,
         "torch_num_threads": TORCH_NUM_THREADS,
         "torch_num_interop_threads": TORCH_NUM_INTEROP_THREADS,
     }
     columns = [
-        "matrix_size",
+        "n_x",
+        "n_y",
         "ts_length",
         "ex",
         "ey",
@@ -224,7 +234,10 @@ def main() -> None:
     for key, value in settings.items():
         print(f"  {key}={value}")
     print()
-    print("matrix_size,ts_length,ex,ey,library_size,sample_size,exclusion_window,attempts,avg_sec,min_sec,max_sec")
+    print(
+        "n_x,n_y,ts_length,ex,ey,library_size,sample_size,exclusion_window,"
+        "attempts,avg_sec,min_sec,max_sec"
+    )
 
     for idx, case in enumerate(cases, start=1):
         result = run_case(
@@ -234,13 +247,15 @@ def main() -> None:
             base_seed=SEED + idx * 1000,
         )
         print(
-            f"{result['matrix_size']},{result['ts_length']},{result['ex']},{result['ey']},"
-            f"{result['library_size']},{result['sample_size']},{result['exclusion_window']},"
-            f"{result['attempts']},{result['avg_sec']:.6f},{result['min_sec']:.6f},{result['max_sec']:.6f}"
+            f"{result['n_x']},{result['n_y']},{result['ts_length']},{result['ex']},"
+            f"{result['ey']},{result['library_size']},{result['sample_size']},"
+            f"{result['exclusion_window']},{result['attempts']},{result['avg_sec']:.6f},"
+            f"{result['min_sec']:.6f},{result['max_sec']:.6f}"
         )
         markdown_rows.append(
             [
-                str(result["matrix_size"]),
+                str(result["n_x"]),
+                str(result["n_y"]),
                 str(result["ts_length"]),
                 str(result["ex"]),
                 str(result["ey"]),
@@ -255,8 +270,8 @@ def main() -> None:
         )
 
     update_report_section(
-        section_id="matrix-performance",
-        title="Matrix Performance",
+        section_id="flat-arrays",
+        title="Flat Arrays",
         script_name=Path(__file__).name,
         settings=settings,
         columns=columns,

@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from benchmark_report import update_report_section
+
 DEVICE = "cpu"
 DTYPE = "float32"
 METHOD = "simplex"
@@ -51,6 +53,8 @@ if str(SRC_DIR) not in sys.path:
 
 from fastccm import PairwiseCCM  # noqa: E402
 from fastccm.utils import get_td_embedding_np  # noqa: E402
+
+
 def resolve_size(size: int | str | None, available_points: int, auto_divisor: int) -> int:
     if size is None:
         return available_points
@@ -141,26 +145,42 @@ def main() -> None:
         memory_budget_gb=MEMORY_BUDGET_GB,
         verbose=0,
     )
+    settings = {
+        "scenario": "single-series self-prediction",
+        "device": DEVICE,
+        "dtype": DTYPE,
+        "method": METHOD,
+        "E": EMBED_DIM,
+        "tau": TAU,
+        "tp": TP,
+        "exclusion_window": EXCLUSION_WINDOW,
+        "library_size": LIBRARY_SIZE if LIBRARY_SIZE is not None else "all valid points",
+        "sample_size": SAMPLE_SIZE if SAMPLE_SIZE is not None else "all valid points",
+        "batch_size": BATCH_SIZE,
+        "memory_budget_gb": MEMORY_BUDGET_GB,
+        "xtwx_precompute": XTWX_PRECOMPUTE,
+        "xtwy_precompute": XTWY_PRECOMPUTE,
+        "attempts": ATTEMPTS,
+        "lengths": LENGTHS,
+        "torch_num_threads": TORCH_NUM_THREADS,
+        "torch_num_interop_threads": TORCH_NUM_INTEROP_THREADS,
+    }
+    columns = [
+        "length",
+        "embedded_length",
+        "library_size",
+        "sample_size",
+        "exclusion_window",
+        "attempts",
+        "avg_sec",
+        "min_sec",
+        "max_sec",
+    ]
+    markdown_rows: list[list[str]] = []
 
     print("Benchmark settings:")
-    print("  scenario=single-series self-prediction")
-    print(f"  device={DEVICE}")
-    print(f"  dtype={DTYPE}")
-    print(f"  method={METHOD}")
-    print(f"  E={EMBED_DIM}")
-    print(f"  tau={TAU}")
-    print(f"  tp={TP}")
-    print(f"  exclusion_window={EXCLUSION_WINDOW}")
-    print(f"  library_size={LIBRARY_SIZE if LIBRARY_SIZE is not None else 'all valid points'}")
-    print(f"  sample_size={SAMPLE_SIZE if SAMPLE_SIZE is not None else 'all valid points'}")
-    print(f"  batch_size={BATCH_SIZE}")
-    print(f"  memory_budget_gb={MEMORY_BUDGET_GB}")
-    print(f"  xtwx_precompute={XTWX_PRECOMPUTE}")
-    print(f"  xtwy_precompute={XTWY_PRECOMPUTE}")
-    print(f"  attempts={ATTEMPTS}")
-    print(f"  lengths={LENGTHS}")
-    print(f"  torch_num_threads={TORCH_NUM_THREADS}")
-    print(f"  torch_num_interop_threads={TORCH_NUM_INTEROP_THREADS}")
+    for key, value in settings.items():
+        print(f"  {key}={value}")
     print()
     print("length,embedded_length,library_size,sample_size,exclusion_window,attempts,avg_sec,min_sec,max_sec")
 
@@ -176,6 +196,28 @@ def main() -> None:
             f"{result['sample_size']},{result['exclusion_window']},{result['attempts']},"
             f"{result['avg_sec']:.6f},{result['min_sec']:.6f},{result['max_sec']:.6f}"
         )
+        markdown_rows.append(
+            [
+                str(result["length"]),
+                str(result["embedded_length"]),
+                str(result["library_size"]),
+                str(result["sample_size"]),
+                str(result["exclusion_window"]),
+                str(result["attempts"]),
+                f"{result['avg_sec']:.6f}",
+                f"{result['min_sec']:.6f}",
+                f"{result['max_sec']:.6f}",
+            ]
+        )
+
+    update_report_section(
+        section_id="single-series",
+        title="Single-Series Self-Prediction",
+        script_name=Path(__file__).name,
+        settings=settings,
+        columns=columns,
+        rows=markdown_rows,
+    )
 
 
 if __name__ == "__main__":
