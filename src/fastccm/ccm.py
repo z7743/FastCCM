@@ -145,6 +145,26 @@ class PairwiseCCM:
             str(self.device),
         )
 
+    def _log_base_over_budget(self, batch_auto_meta) -> None:
+        """
+        Say so when the budget was unreachable before batching began.
+
+        The base is the sampled libraries and the copies taken of them: it is
+        resident for the whole call whatever batch size is chosen, so the policy
+        keeps a working batch and overshoots rather than serialising for memory
+        it cannot save.
+        """
+        if not batch_auto_meta.get("base_over_budget"):
+            return
+        self.logger.warning(
+            "Resident tensors (%s) already exceed memory_budget_gb=%s (%s); "
+            "batching cannot reclaim them, so the run will overshoot the budget. "
+            "Raise memory_budget_gb, or split the target axis across calls.",
+            format_bytes(batch_auto_meta["base_bytes"]),
+            str(self.memory_budget_gb),
+            format_bytes(batch_auto_meta["budget_bytes"]),
+        )
+
     def compute(self, *args, **kwargs):
         """
         DEPRECATED: Use `score_matrix(...)` instead.
@@ -1100,6 +1120,7 @@ class PairwiseCCM:
                 format_bytes(batch_auto_meta["budget_bytes"]),
                 format_bytes(selected_peak_bytes),
             )
+            self._log_base_over_budget(batch_auto_meta)
             out = self.__simplex_prediction(
                 lib_indices, smpl_indices,
                 X_lib, X_sample, Y_lib_s, Y_smp_s,
@@ -1149,6 +1170,7 @@ class PairwiseCCM:
                 format_bytes(batch_auto_meta["budget_bytes"]),
                 format_bytes(selected_peak_bytes),
             )
+            self._log_base_over_budget(batch_auto_meta)
             self.logger.info(
                 "SMAP config theta=%s ridge=%s xtwx_precompute=%s xtwy_precompute=%s",
                 str(theta),

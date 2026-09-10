@@ -98,15 +98,41 @@ def _shape_bytes(shape, itemsize: int) -> int:
     return int(math.prod(int(dim) for dim in shape) * int(itemsize))
 
 
+# `base_bytes` is the resident inputs and the copies taken of them, so no batch
+# size reclaims any of it: only the per-batch scratch is actually being sized.
+# Subtracting an over-budget base leaves a negative allowance, and reading that
+# as "batch of one" collapses throughput by orders of magnitude while saving
+# nothing -- the base is allocated either way. Size scratch against a floor
+# fraction of the budget instead, so an unreachable budget overshoots by a
+# bounded amount rather than serialising the run.
+BATCH_SCRATCH_FLOOR_FRACTION = 0.25
+
+
+def _scratch_allowance(budget_bytes: int, base_bytes: int):
+    """
+    Bytes the batching policy may spend on per-batch scratch.
+
+    Returns `(available_bytes, base_over_budget)`. `available_bytes` is always
+    positive: once the base alone clears the budget the floor fraction applies
+    and the flag says the estimate has been exceeded before batching begins.
+
+    The allowance therefore jumps at the crossing rather than shrinking to zero.
+    That is deliberate: a budget the base still fits inside is honoured exactly,
+    and only a budget that cannot be met is traded for throughput.
+    """
+    available_bytes = int(budget_bytes) - int(base_bytes)
+    if available_bytes > 0:
+        return available_bytes, False
+    return max(1, int(int(budget_bytes) * BATCH_SCRATCH_FLOOR_FRACTION)), True
+
+
 def _resolve_batch_size(total_samples: int, budget_bytes: int, base_bytes: int, per_sample_bytes: int):
     if total_samples <= 0:
         return 0
     if per_sample_bytes <= 0:
-        return min(int(total_samples), 1)
+        return int(total_samples)
 
-    available_bytes = int(budget_bytes) - int(base_bytes)
-    if available_bytes <= 0:
-        return 1
+    available_bytes, _ = _scratch_allowance(budget_bytes, base_bytes)
 
     batch_size = available_bytes // int(per_sample_bytes)
     batch_size = max(1, int(batch_size))
@@ -255,9 +281,7 @@ def _calibrated_simplex_target_batch_size(
     if dominance >= SIMPLEX_CALIBRATED_SEARCH_DOMINANT_RATIO:
         return min(nY, int(SIMPLEX_CALIBRATED_SEARCH_DOMINANT_TARGET_BATCH))
 
-    available_bytes = int(budget_bytes) - int(base_bytes)
-    if available_bytes <= 0:
-        return min(nY, target_batch_min)
+    available_bytes, _ = _scratch_allowance(budget_bytes, base_bytes)
 
     # Use the search-dominated batch as the first fixed-point iterate, then set
     # `ny` so the gathered target tile stays near the calibrated working set.
@@ -329,6 +353,7 @@ def auto_batch_size_smap(
         "per_sample_bytes": int(per_sample_bytes),
         "budget_bytes": int(budget_bytes),
         "estimated_peak_bytes": int(base_bytes + B * max(per_sample_bytes, 0)),
+        "base_over_budget": bool(base_bytes >= budget_bytes),
     }
 
 
@@ -408,6 +433,7 @@ def auto_batch_size_simplex(
         "budget_bytes": int(budget_bytes),
         "estimated_peak_bytes": int(base_bytes + B * max(per_sample_bytes, 0)),
         "target_batch_size": int(y_batch),
+        "base_over_budget": bool(base_bytes >= budget_bytes),
     }
 
 

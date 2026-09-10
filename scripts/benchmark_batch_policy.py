@@ -126,6 +126,7 @@ PairwiseCCM, runtime_module = load_fastccm_modules()
 _calibrated_simplex_target_batch_size = runtime_module._calibrated_simplex_target_batch_size
 _dtype_bytes = runtime_module._dtype_bytes
 _resolve_batch_size = runtime_module._resolve_batch_size
+_scratch_allowance = runtime_module._scratch_allowance
 _simplex_base_bytes = runtime_module._simplex_base_bytes
 _simplex_per_sample_bytes = runtime_module._simplex_per_sample_bytes
 
@@ -390,9 +391,7 @@ def resolve_target_batch_size(
     dominance = float(search_per_sample) / float(max(reduce_per_sample_full, 1))
     if dominance >= calibrated.search_ratio:
         return min(n_y, int(calibrated.search_batch))
-    available_bytes = int(budget_bytes) - int(base_bytes)
-    if available_bytes <= 0:
-        return min(n_y, int(calibrated.min_batch))
+    available_bytes, _ = _scratch_allowance(budget_bytes, base_bytes)
     sample_batch_search = max(
         1,
         min(sample_size, available_bytes // max(int(search_per_sample), 1)),
